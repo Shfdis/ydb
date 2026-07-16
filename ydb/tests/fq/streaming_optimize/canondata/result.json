@@ -241,7 +241,27 @@
             "uri": "file://test_sql_streaming.test_watermarks-watermarks-default.txt_/plan.json"
         }
     },
+<<<<<<< HEAD
     "test_sql_streaming.test[watermarks-watermarks_as-default.txt]": {
+=======
+    "test_sql_streaming.test[watermarks-watermarks_after_parsing-default.txt]": {
+        "Ast": {
+            "uri": "file://test_sql_streaming.test_watermarks-watermarks_after_parsing-default.txt_/ast.txt"
+        },
+        "Plan": {
+            "uri": "file://test_sql_streaming.test_watermarks-watermarks_after_parsing-default.txt_/plan.json"
+        }
+    },
+    "test_sql_streaming.test[watermarks-watermarks_after_parsing_metadata-default.txt]": {
+        "Ast": {
+            "uri": "file://test_sql_streaming.test_watermarks-watermarks_after_parsing_metadata-default.txt_/ast.txt"
+        },
+        "Plan": {
+            "uri": "file://test_sql_streaming.test_watermarks-watermarks_after_parsing_metadata-default.txt_/plan.json"
+        }
+    },
+    "test_sql_streaming.test[watermarks-watermarks_conditional-default.txt]": {
+>>>>>>> b9c9193f06e ([YQ-5323] Watermarks: DQ: advanced mode (#45303))
         "Ast": {
             "uri": "file://test_sql_streaming.test_watermarks-watermarks_as-default.txt_/ast.txt"
         },
