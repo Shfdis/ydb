@@ -55,6 +55,8 @@ protected:
         , Client_(client)
     {}
 
+    ~TRetryContext() = default;
+
     virtual TStatusType Retry() = 0;
 
     virtual TStatusType RunOperation() = 0;
@@ -114,7 +116,7 @@ private:
 };
 
 template<typename TClient, typename TOperation, typename TStatusType = TFunctionResult<TOperation>>
-class TRetryWithoutSession : public TRetryContext<TClient, TStatusType> {
+class TRetryWithoutSession final : public TRetryContext<TClient, TStatusType> {
 private:
     const TOperation& Operation_;
 
@@ -142,7 +144,7 @@ protected:
 };
 
 template<typename TClient, typename TOperation, typename TStatusType = TFunctionResult<TOperation>>
-class TRetryWithSession : public TRetryContext<TClient, TStatusType>, public TRetryDeadlineHelper<TClient> {
+class TRetryWithSession final : public TRetryContext<TClient, TStatusType>, public TRetryDeadlineHelper<TClient> {
     using TSession = typename TClient::TSession;
     using TCreateSessionSettings = typename TClient::TCreateSessionSettings;
 

@@ -11,7 +11,9 @@ namespace NYdb {
 inline namespace Dev {
 namespace NUtils {
 
+// The same callable is reused for every element and must remain an lvalue.
 template <class TContainer, class T>
+// NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
 bool ContainerTransform(TContainer& str, T&& f, size_t pos = 0, size_t n = TContainer::npos) {
     size_t len = str.size();
     if (pos > len) {

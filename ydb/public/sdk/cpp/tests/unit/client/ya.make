@@ -2,6 +2,7 @@ RECURSE(
     build_info
     connection_string
     coordination
+    core_facility
     discovery_mutator
     draft
     driver
@@ -16,5 +17,6 @@ RECURSE(
     row_ranges
     retry_range
     table
+    topic
     value
 )

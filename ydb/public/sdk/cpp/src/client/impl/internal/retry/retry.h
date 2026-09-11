@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 namespace NYdb::inline Dev {
 class IClientImplCommon;
@@ -64,6 +65,8 @@ protected:
         , RetryNumber_(0)
         , RetryStartTime_(TInstant::Now())
     {}
+
+    ~TRetryContextBase() = default;
 
     virtual void Reset() {}
 
@@ -144,7 +147,7 @@ TStatusType MakeRetryResultFromStatus(TStatus&& status) {
 template <typename TStatusType, typename F>
 TStatusType InvokeWithRangeErrorCatch(F&& f) {
     try {
-        return f();
+        return std::forward<F>(f)();
     } catch (const NStatusHelpers::TYdbRangeErrorException& e) {
         return MakeRetryResultFromStatus<TStatusType>(TStatus(e.GetStatus()));
     }

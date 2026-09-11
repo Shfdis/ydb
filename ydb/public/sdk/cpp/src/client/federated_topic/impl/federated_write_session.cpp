@@ -341,11 +341,6 @@ void TFederatedWriteSessionImpl::ScheduleFederationStateUpdateImpl(TDuration del
     };
 
     UpdateStateDelayContext = Connections->CreateContext();
-    if (!UpdateStateDelayContext) {
-        CloseImpl(EStatus::TRANSPORT_UNAVAILABLE, NYdb::NIssue::TIssues{NYdb::NIssue::TIssue("Could not update federation state")});
-        // TODO log DRIVER_IS_STOPPING_DESCRIPTION
-        return;
-    }
     Connections->ScheduleCallback(delay,
                                   std::move(cb),
                                   UpdateStateDelayContext);
@@ -393,10 +388,8 @@ NThreading::TFuture<bool> TFederatedWriteSessionImpl::Flush() {
 void TFederatedWriteSessionImpl::Write(NTopic::TContinuationToken&& token, std::string_view data, std::optional<uint64_t> seqNo,
                                    std::optional<TInstant> createTimestamp) {
     NTopic::TWriteMessage message{std::move(data)};
-    if (seqNo.has_value())
-        message.SeqNo(*seqNo);
-    if (createTimestamp.has_value())
-        message.CreateTimestamp(*createTimestamp);
+    message.SeqNo(seqNo);
+    message.CreateTimestamp(createTimestamp);
     return WriteInternal(std::move(token), std::move(message));
 }
 
@@ -407,10 +400,8 @@ void TFederatedWriteSessionImpl::Write(NTopic::TContinuationToken&& token, NTopi
 void TFederatedWriteSessionImpl::WriteEncoded(NTopic::TContinuationToken&& token, std::string_view data, NTopic::ECodec codec,
                                           ui32 originalSize, std::optional<uint64_t> seqNo, std::optional<TInstant> createTimestamp) {
     auto message = NTopic::TWriteMessage::CompressedMessage(std::move(data), codec, originalSize);
-    if (seqNo.has_value())
-        message.SeqNo(*seqNo);
-    if (createTimestamp.has_value())
-        message.CreateTimestamp(*createTimestamp);
+    message.SeqNo(seqNo);
+    message.CreateTimestamp(createTimestamp);
     return WriteInternal(std::move(token), TWrappedWriteMessage(std::move(message)));
 }
 
@@ -579,7 +570,7 @@ bool TSimpleBlockingFederatedWriteSession::Close(TDuration closeTimeout) {
 
 TSimpleBlockingFederatedWriteSession::~TSimpleBlockingFederatedWriteSession() {
     if (!Closed.load()) {
-        Close(TDuration::Zero());
+        TSimpleBlockingFederatedWriteSession::Close(TDuration::Zero());
     }
 }
 

@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -72,11 +73,11 @@ private:
 
 class TBenchGauge : public IGauge {
 public:
-    void Add(double delta) override { Value_ += delta; }
-    void Set(double value) override { Value_ = value; }
-    double Get() const { return Value_; }
+    void Add(double delta) override { Value_.fetch_add(delta, std::memory_order_relaxed); }
+    void Set(double value) override { Value_.store(value, std::memory_order_relaxed); }
+    double Get() const { return Value_.load(std::memory_order_relaxed); }
 private:
-    double Value_ = 0.0;
+    std::atomic<double> Value_ = 0.0;
 };
 
 class TBenchRegistry : public IMetricRegistry {
@@ -148,6 +149,8 @@ struct TResult {
     std::uint64_t RecordCalls = 0;
     std::uint64_t RecordManyCalls = 0;
     double DurationMs = 0.0;
+    std::uint64_t DeliveredCounter = 0;
+    std::uint64_t DeliveredHistogram = 0;
 };
 
 TResult RunWorkload(const std::string& mode,
@@ -184,15 +187,26 @@ TResult RunWorkload(const std::string& mode,
         w.join();
     }
 
+    FlushBufferedMetricRegistry(registry);
     counter.reset();
     hist.reset();
     registry.reset();
 
-    const auto duration = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
-
     auto sinkCounter = sink->GetCounter("bench.counter", {});
     auto sinkHist = sink->GetHistogram("bench.histogram", {});
+    const auto expected = static_cast<std::uint64_t>(threads) * opsPerThread;
+    const auto completionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    // Destruction may overlap a background flush. Time completed backend updates,
+    // not only their submission, and fail instead of timing dropped/duplicate data.
+    while (sinkCounter->Get() != expected || sinkHist->Count() != expected) {
+        if (sinkCounter->Get() > expected || sinkHist->Count() > expected
+            || std::chrono::steady_clock::now() >= completionDeadline) {
+            throw std::runtime_error("Metric workload did not deliver exactly the expected updates");
+        }
+        std::this_thread::yield();
+    }
+    const auto duration = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
 
     TResult r;
     r.Mode = mode;
@@ -202,6 +216,8 @@ TResult RunWorkload(const std::string& mode,
     r.RecordCalls = sinkHist ? sinkHist->RecordCalls() : 0;
     r.RecordManyCalls = sinkHist ? sinkHist->RecordManyCalls() : 0;
     r.DurationMs = duration;
+    r.DeliveredCounter = sinkCounter->Get();
+    r.DeliveredHistogram = sinkHist->Count();
     return r;
 }
 
@@ -224,6 +240,7 @@ void PrintRow(const TResult& r) {
         << "\n            "
         << "  counter[Inc=" << r.IncCalls << ", Add=" << r.AddCalls << "]"
         << "  histogram[Record=" << r.RecordCalls << ", RecordMany=" << r.RecordManyCalls << "]"
+        << "  delivered[counter=" << r.DeliveredCounter << ", histogram=" << r.DeliveredHistogram << "]"
         << "  coalesce=" << std::setprecision(2) << coalesce << "x"
         << std::endl;
 }
@@ -268,7 +285,7 @@ int main(int argc, char** argv) {
     if (runDirect) {
         auto sink = std::make_shared<TBenchRegistry>();
         auto registry = std::static_pointer_cast<IMetricRegistry>(sink);
-        auto r = RunWorkload("direct", threads, ops, registry, sink);
+        auto r = RunWorkload("direct", threads, ops, std::move(registry), sink);
         PrintRow(r);
     }
 
@@ -276,8 +293,10 @@ int main(int argc, char** argv) {
         auto sink = std::make_shared<TBenchRegistry>();
         TMetricBufferSettings settings;
         settings.FlushInterval = std::chrono::milliseconds(flushMs);
+        // Measure delivery of every update; a bounded backlog may intentionally drop.
+        settings.ThreadPendingLimit = 0;
         auto registry = CreateBufferedMetricRegistry(sink, settings);
-        auto r = RunWorkload("buffered", threads, ops, registry, sink);
+        auto r = RunWorkload("buffered", threads, ops, std::move(registry), sink);
         PrintRow(r);
     }
 

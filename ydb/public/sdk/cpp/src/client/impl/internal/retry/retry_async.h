@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <typeinfo>
 
 namespace NYdb::inline Dev::NRetry::Async {
@@ -251,10 +252,11 @@ private:
 
     TAsyncStatusType RunOperation() override {
         TInRetryOperationContextClientGuard guard(this->Client_);
+        auto& session = Session_ ? *Session_ : throw std::bad_optional_access();
         if constexpr (TFunctionArgs<TOperation>::Length == 1) {
-            return Operation_(this->Session_.value());
+            return Operation_(session);
         } else {
-            return Operation_(this->Session_.value(), this->GetRemainingTimeout());
+            return Operation_(session, this->GetRemainingTimeout());
         }
     }
 };

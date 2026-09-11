@@ -14,6 +14,7 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/tx/tx.h>
 
 #include <memory>
+#include <optional>
 #include <variant>
 
 namespace Ydb {
@@ -2730,21 +2731,21 @@ using TReadTableResultPart = TSimpleStreamPart<TResultSet>;
 class TScanQueryPart : public TStreamPartStatus {
 public:
     bool HasResultSet() const { return ResultSet_.has_value(); }
-    const TResultSet& GetResultSet() const { return *ResultSet_; }
-    TResultSet ExtractResultSet() { return std::move(*ResultSet_); }
+    const TResultSet& GetResultSet() const { return ResultSet_ ? *ResultSet_ : throw std::bad_optional_access(); }
+    TResultSet ExtractResultSet() { return ResultSet_ ? std::move(*ResultSet_) : throw std::bad_optional_access(); }
 
     bool HasQueryStats() const { return QueryStats_.has_value(); }
-    const TQueryStats& GetQueryStats() const { return *QueryStats_; }
-    TQueryStats ExtractQueryStats() { return std::move(*QueryStats_); }
+    const TQueryStats& GetQueryStats() const { return QueryStats_ ? *QueryStats_ : throw std::bad_optional_access(); }
+    TQueryStats ExtractQueryStats() { return QueryStats_ ? std::move(*QueryStats_) : throw std::bad_optional_access(); }
 
     // Deprecated. Use GetMeta() of TQueryStats
     bool HasDiagnostics() const { return Diagnostics_.has_value(); }
-    const std::string& GetDiagnostics() const { return *Diagnostics_; }
-    std::string&& ExtractDiagnostics() { return std::move(*Diagnostics_); }
+    const std::string& GetDiagnostics() const { return Diagnostics_ ? *Diagnostics_ : throw std::bad_optional_access(); }
+    std::string&& ExtractDiagnostics() { return Diagnostics_ ? std::move(*Diagnostics_) : throw std::bad_optional_access(); }
 
     bool HasVirtualTimestamp() const { return Vt_.has_value(); }
-    const TVirtualTimestamp& GetVirtualTimestamp() const { return *Vt_; }
-    TVirtualTimestamp&& ExtractVirtualTimestamp() { return std::move(*Vt_); }
+    const TVirtualTimestamp& GetVirtualTimestamp() const { return Vt_ ? *Vt_ : throw std::bad_optional_access(); }
+    TVirtualTimestamp&& ExtractVirtualTimestamp() { return Vt_ ? std::move(*Vt_) : throw std::bad_optional_access(); }
 
     TScanQueryPart(TStatus&& status)
         : TStreamPartStatus(std::move(status))

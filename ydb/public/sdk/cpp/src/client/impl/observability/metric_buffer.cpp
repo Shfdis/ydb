@@ -1,16 +1,16 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/metrics/metric_buffer.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/library/runtime/runtime.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -75,8 +75,11 @@ public:
     }
 
     void Start() {
-        FlushThread_ = std::thread([this] {
-            Run();
+        GetRuntime().Schedule(Settings_.FlushInterval, [weak = weak_from_this()] {
+            if (auto self = weak.lock(); self && !self->Stopping_.load(std::memory_order_acquire)) {
+                self->TriggerFlush(EFlushTrigger::Interval);
+                self->Start();
+            }
         });
     }
 
@@ -89,23 +92,9 @@ public:
         if (!Stopping_.compare_exchange_strong(expected, true)) {
             return;
         }
-        {
-            std::lock_guard<std::mutex> lock(WaitMutex_);
-            Wakeup_.notify_all();
-        }
-        if (FlushThread_.joinable()) {
-            try {
-                FlushThread_.join();
-            } catch (...) {
-                // best-effort
-            }
-        }
-        try {
-            FlushAll(EFlushTrigger::Shutdown);
-        } catch (...) {
-            // best-effort: never let a misbehaving underlying registry crash the
-            // owning application during teardown.
-        }
+        // Running flushes retain their core and backend. Never wait here: a backend
+        // callback may itself release the registry. Drain the remaining local data.
+        FlushNoThrow(EFlushTrigger::Shutdown);
     }
 
     // -- Handle registration --------------------------------------------------
@@ -144,9 +133,12 @@ public:
         TThreadState& state = AcquireThreadState();
         bool dropped = false;
         bool overThreshold = false;
+        bool stopped = false;
         {
             std::lock_guard<std::mutex> lock(state.Mutex);
-            if (ShouldDropUpdate(state.PendingOps, 1)) {
+            if (Stopping_.load(std::memory_order_acquire)) {
+                stopped = true;
+            } else if (ShouldDropUpdate(state.PendingOps, 1)) {
                 dropped = true;
             } else {
                 if (state.CounterDeltas.size() <= handle) {
@@ -157,6 +149,10 @@ public:
                 overThreshold = Settings_.ThreadPendingThreshold != 0
                     && state.PendingOps >= Settings_.ThreadPendingThreshold;
             }
+        }
+        if (stopped) {
+            OnCounterAdd(handle, delta);
+            return;
         }
         if (dropped) {
             ReportDroppedCounter(delta);
@@ -185,9 +181,12 @@ public:
         TThreadState& state = AcquireThreadState();
         bool dropped = false;
         bool overThreshold = false;
+        bool stopped = false;
         {
             std::lock_guard<std::mutex> lock(state.Mutex);
-            if (ShouldDropUpdate(state.PendingOps, 1)) {
+            if (Stopping_.load(std::memory_order_acquire)) {
+                stopped = true;
+            } else if (ShouldDropUpdate(state.PendingOps, 1)) {
                 dropped = true;
             } else {
                 if (state.HistogramSamples.size() <= handle) {
@@ -202,6 +201,10 @@ public:
                 overThreshold = Settings_.ThreadPendingThreshold != 0
                     && state.PendingOps >= Settings_.ThreadPendingThreshold;
             }
+        }
+        if (stopped) {
+            OnHistogramRecord(handle, value);
+            return;
         }
         if (dropped) {
             ReportDroppedHistogram(1);
@@ -233,9 +236,12 @@ public:
         TThreadState& state = AcquireThreadState();
         bool dropped = false;
         bool overThreshold = false;
+        bool stopped = false;
         {
             std::lock_guard<std::mutex> lock(state.Mutex);
-            if (ShouldDropUpdate(state.PendingOps, values.size())) {
+            if (Stopping_.load(std::memory_order_acquire)) {
+                stopped = true;
+            } else if (ShouldDropUpdate(state.PendingOps, values.size())) {
                 dropped = true;
             } else {
                 if (state.HistogramSamples.size() <= handle) {
@@ -247,6 +253,10 @@ public:
                 overThreshold = Settings_.ThreadPendingThreshold != 0
                     && state.PendingOps >= Settings_.ThreadPendingThreshold;
             }
+        }
+        if (stopped) {
+            OnHistogramRecordMany(handle, values);
+            return;
         }
         if (dropped) {
             ReportDroppedHistogram(values.size());
@@ -266,25 +276,26 @@ public:
 
 private:
     struct TThreadLocalHolder {
+        TMetricBufferCore* Key = nullptr;
         std::shared_ptr<TThreadState> State;
         std::weak_ptr<TMetricBufferCore> Owner;
 
         TThreadLocalHolder() = default;
-        TThreadLocalHolder(std::shared_ptr<TThreadState> state,
-                           std::weak_ptr<TMetricBufferCore> owner) noexcept
-            : State(std::move(state)), Owner(std::move(owner)) {}
+        TThreadLocalHolder(TMetricBufferCore* owner, std::shared_ptr<TThreadState> state) noexcept
+            : Key(owner), State(std::move(state)), Owner(owner->weak_from_this()) {}
 
         TThreadLocalHolder(const TThreadLocalHolder&) = delete;
         TThreadLocalHolder& operator=(const TThreadLocalHolder&) = delete;
 
         TThreadLocalHolder(TThreadLocalHolder&& other) noexcept
-            : State(std::move(other.State)), Owner(std::move(other.Owner)) {}
+            : Key(std::exchange(other.Key, nullptr)), State(std::move(other.State)), Owner(std::move(other.Owner)) {}
 
         TThreadLocalHolder& operator=(TThreadLocalHolder&& other) noexcept {
             if (this != &other) {
                 if (State) {
                     State->Active.store(false, std::memory_order_release);
                 }
+                Key = std::exchange(other.Key, nullptr);
                 State = std::move(other.State);
                 Owner = std::move(other.Owner);
             }
@@ -302,31 +313,28 @@ private:
     };
 
     TThreadState& AcquireThreadState() {
-        thread_local std::vector<std::pair<TMetricBufferCore*, std::shared_ptr<TThreadState>>>
-            tlsTable;
-
-        for (auto& kv : tlsTable) {
-            if (kv.first == this) {
-                return *kv.second;
+        thread_local std::vector<TThreadLocalHolder> holders;
+        for (auto& holder : holders) {
+            if (holder.Key == this && !holder.Owner.expired()) {
+                return *holder.State;
             }
         }
 
+        std::erase_if(holders, [](const auto& holder) {
+            return holder.Owner.expired();
+        });
         auto state = std::make_shared<TThreadState>();
         {
             std::lock_guard<std::mutex> lock(ThreadsMutex_);
             ThreadStates_.push_back(state);
         }
-        tlsTable.emplace_back(this, state);
-
-        thread_local std::vector<TThreadLocalHolder> holders;
-        holders.emplace_back(state, weak_from_this());
+        holders.emplace_back(this, state);
 
         return *state;
     }
 
     void NudgeOnThreadExit() noexcept {
-        std::lock_guard<std::mutex> lock(WaitMutex_);
-        Wakeup_.notify_all();
+        TriggerFlush(EFlushTrigger::Interval);
     }
 
     bool ShouldDropUpdate(std::size_t pending, std::size_t incomingOps) const noexcept {
@@ -344,6 +352,7 @@ private:
             try {
                 DroppedCounterUpdates_->Add(updates);
             } catch (...) {
+                std::fputs("YDB metric buffer: backend callback threw an exception.\n", stderr);
             }
         }
     }
@@ -353,38 +362,35 @@ private:
             try {
                 DroppedHistogramUpdates_->Add(static_cast<std::uint64_t>(updates));
             } catch (...) {
+                std::fputs("YDB metric buffer: backend callback threw an exception.\n", stderr);
             }
         }
     }
 
     void TriggerFlush(EFlushTrigger trigger) noexcept {
-        ManualTrigger_.store(true, std::memory_order_release);
-        LastManualTrigger_.store(static_cast<int>(trigger), std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lock(WaitMutex_);
-        Wakeup_.notify_all();
+        if (Stopping_.load(std::memory_order_acquire) || FlushPosted_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        try {
+            GetRuntime().Post([weak = weak_from_this(), trigger] {
+                if (auto self = weak.lock()) {
+                    if (!self->Stopping_.load(std::memory_order_acquire)) {
+                        self->FlushNoThrow(trigger);
+                    }
+                    self->FlushPosted_.store(false, std::memory_order_release);
+                }
+            });
+        } catch (...) {
+            FlushPosted_.store(false, std::memory_order_release);
+        }
     }
 
-    void Run() noexcept {
-        while (!Stopping_.load(std::memory_order_acquire)) {
-            EFlushTrigger trigger = EFlushTrigger::Interval;
-            {
-                std::unique_lock<std::mutex> lock(WaitMutex_);
-                Wakeup_.wait_for(lock, Settings_.FlushInterval, [this]{
-                    return Stopping_.load(std::memory_order_acquire)
-                        || ManualTrigger_.load(std::memory_order_acquire);
-                });
-                if (Stopping_.load(std::memory_order_acquire)) {
-                    break;
-                }
-                if (ManualTrigger_.exchange(false, std::memory_order_acq_rel)) {
-                    trigger = static_cast<EFlushTrigger>(
-                        LastManualTrigger_.load(std::memory_order_relaxed));
-                }
-            }
-            try {
-                FlushAll(trigger);
-            } catch (...) {
-            }
+    void FlushNoThrow(EFlushTrigger trigger) noexcept {
+        try {
+            FlushAll(trigger);
+        } catch (...) {
+            // A misbehaving backend must not stop maintenance or escape teardown.
+            std::fputs("YDB metric buffer: flush failed.\n", stderr);
         }
     }
 
@@ -478,6 +484,7 @@ private:
                     counters[i]->Add(totalCounter[i]);
                     ++addCalls;
                 } catch (...) {
+                    std::fputs("YDB metric buffer: backend callback threw an exception.\n", stderr);
                 }
             }
         }
@@ -488,6 +495,7 @@ private:
                     histograms[i]->RecordMany(totalSamples[i]);
                     ++recordManyCalls;
                 } catch (...) {
+                    std::fputs("YDB metric buffer: backend callback threw an exception.\n", stderr);
                 }
             }
         }
@@ -538,13 +546,15 @@ private:
         if (!reg) {
             return nullptr;
         }
-        const char* trig = "interval";
-        switch (trigger) {
-            case EFlushTrigger::Interval:  trig = "interval";  break;
-            case EFlushTrigger::Threshold: trig = "threshold"; break;
-            case EFlushTrigger::Manual:    trig = "manual";    break;
-            case EFlushTrigger::Shutdown:  trig = "shutdown";  break;
-        }
+        const auto trig = [trigger] {
+            switch (trigger) {
+                case EFlushTrigger::Interval:  return "interval";
+                case EFlushTrigger::Threshold: return "threshold";
+                case EFlushTrigger::Manual:    return "manual";
+                case EFlushTrigger::Shutdown:  return "shutdown";
+            }
+            return "unknown";
+        }();
         TLabels labels = {{"trigger", trig}};
         return reg->Counter(kFlushesTotalMetric, labels,
             "Total number of TMetricBuffer flush passes, by trigger.", "1");
@@ -572,6 +582,7 @@ private:
             try {
                 fn();
             } catch (...) {
+                std::fputs("YDB metric buffer: backend callback threw an exception.\n", stderr);
             }
         };
 
@@ -612,13 +623,8 @@ private:
     mutable std::mutex ThreadsMutex_;
     std::vector<std::shared_ptr<TThreadState>> ThreadStates_;
 
-    std::mutex WaitMutex_;
-    std::condition_variable Wakeup_;
     std::atomic<bool> Stopping_{false};
-    std::atomic<bool> ManualTrigger_{false};
-    std::atomic<int> LastManualTrigger_{static_cast<int>(EFlushTrigger::Manual)};
-
-    std::thread FlushThread_;
+    std::atomic<bool> FlushPosted_{false};
 
     std::shared_ptr<IHistogram> FlushDurationHist_;
     std::shared_ptr<ICounter> EventsBufferedCounter_;

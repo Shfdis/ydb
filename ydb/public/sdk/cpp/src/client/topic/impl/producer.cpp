@@ -7,6 +7,7 @@
 #include <util/string/hex.h>
 #include <util/generic/guid.h>
 
+#include <cstdio>
 #include <format>
 
 namespace NYdb::inline Dev::NTopic {
@@ -456,9 +457,10 @@ void TProducer::TSplittedPartitionWorker::LaunchGetMaxSeqNoFutures(std::unique_l
     for (const auto& ancestor : ancestors) {
         auto ancestorIt = Producer->Partitions.find(ancestor);
         Y_ABORT_UNLESS(ancestorIt != Producer->Partitions.end(), "Ancestor partition %u not found", ancestor);
-        if (ancestorIt->second.CachedMaxSeqNo.has_value()) {
+        const auto& cachedMaxSeqNo = ancestorIt->second.CachedMaxSeqNo;
+        if (cachedMaxSeqNo.has_value()) {
             --NotReadyFutures;
-            UpdateMaxSeqNo(ancestor, ancestorIt->second.CachedMaxSeqNo.value());
+            UpdateMaxSeqNo(ancestor, cachedMaxSeqNo.value());
             continue;
         }
         auto wrappedSession = Producer->SessionsWorker->GetOrCreateWriteSession(ancestor, false);
@@ -1406,11 +1408,12 @@ void TProducer::TMessagesWorker::ScheduleResendMessages(std::uint32_t partition,
     std::vector<TWriteSessionEvent::TWriteAck> acksToSend;
 
     while (resendIt != list.end()) {
-        if (!(*resendIt)->SeqNo.has_value() || (*resendIt)->SeqNo.value() > afterSeqNo) {
+        const auto& messageSeqNo = (*resendIt)->SeqNo;
+        if (!messageSeqNo.has_value() || messageSeqNo.value() > afterSeqNo) {
             break;
         }
 
-        auto seqNo = (*resendIt)->SeqNo.value();
+        auto seqNo = messageSeqNo.value();
         if (ackQueueIt == ackQueueEnd) {
             // this case can happen if the message was sent, but session was closed before the ack was received
             TWriteSessionEvent::TWriteAck ack;
@@ -1805,6 +1808,8 @@ TCloseResult TProducer::Close(TDuration closeTimeout) {
     SetCloseDeadline(closeTimeout);
     ClosePromise.TrySetValue();
 
+    // Destruction intentionally uses this class's cleanup; ordinary Close calls retain virtual dispatch.
+    // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
     Flush().Wait(CloseDeadline);
     ShutdownFuture.Wait(CloseDeadline);
     RunUserEventLoop();
@@ -1842,7 +1847,7 @@ void TProducer::SetCloseDeadline(const TDuration& closeTimeout) {
 
 TProducer::~TProducer() {
     try {
-        auto _ = Close(TDuration::Zero()); // Ignore the result, because we are destroying the producer
+        auto _ = TProducer::Close(TDuration::Zero()); // Ignore the result, because we are destroying the producer
 
         if (MainWorkerState.load() == Idle) {
             ShutdownPromise.TrySetValue();
@@ -1864,6 +1869,7 @@ TProducer::~TProducer() {
         }
     } catch (...) {
         // Destructors must not throw.
+        std::fputs("YDB topic producer cleanup failed.\n", stderr);
     }
 }
 
@@ -2004,7 +2010,7 @@ bool TProducer::IsFederation(const std::string& endpoint) {
     return host == "logbroker.yandex.net" || host == "logbroker-prestable.yandex.net";
 }
 
-void TProducer::GetSessionClosedEventAndDie(WrappedWriteSessionPtr wrappedSession, std::optional<TSessionClosedEvent> sessionClosedEvent) {
+void TProducer::GetSessionClosedEventAndDie(WrappedWriteSessionPtr wrappedSession, TSessionClosedEvent sessionClosedEvent) {
     std::optional<TSessionClosedEvent> receivedSessionClosedEvent;
     while (true) {
         auto event = wrappedSession->Session->GetEvent(false);
@@ -2020,7 +2026,7 @@ void TProducer::GetSessionClosedEventAndDie(WrappedWriteSessionPtr wrappedSessio
 
     if (!receivedSessionClosedEvent || receivedSessionClosedEvent->GetStatus() == EStatus::SUCCESS || receivedSessionClosedEvent->GetStatus() == EStatus::OVERLOADED) {
         LOG_LAZY(DbDriverState->Log, TLOG_ERR, LogPrefix() << "Failed to get session closed event");
-        EventsWorker->HandleSessionClosedEvent(std::move(*sessionClosedEvent), wrappedSession->Partition);
+        EventsWorker->HandleSessionClosedEvent(std::move(sessionClosedEvent), wrappedSession->Partition);
     } else {
         EventsWorker->HandleSessionClosedEvent(std::move(*receivedSessionClosedEvent), wrappedSession->Partition);
     }

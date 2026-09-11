@@ -10,6 +10,7 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/common_client/ssl_credentials.h>
 
 #include <memory>
+#include <utility>
 
 namespace NYdb::inline Dev {
 
@@ -86,7 +87,7 @@ protected:
             };
 
         Connections_->RunDeferred<TService, TRequest, TResponse>(
-            std::move(request),
+            std::forward<TRequest>(request),
             extractor,
             rpc,
             DbDriverState_,
@@ -117,7 +118,7 @@ protected:
             };
 
         Connections_->RunDeferred<TService, TRequest, TResponse>(
-            std::move(request),
+            std::forward<TRequest>(request),
             extractor,
             rpc,
             DbDriverState_,

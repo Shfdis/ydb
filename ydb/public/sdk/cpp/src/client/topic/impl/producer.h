@@ -411,7 +411,7 @@ private:
 
     TInstant GetCloseDeadline();
 
-    void GetSessionClosedEventAndDie(WrappedWriteSessionPtr wrappedSession, std::optional<TSessionClosedEvent> sessionClosedEvent = std::nullopt);
+    void GetSessionClosedEventAndDie(WrappedWriteSessionPtr wrappedSession, TSessionClosedEvent sessionClosedEvent);
 
     TStringBuilder LogPrefix();
 
@@ -499,7 +499,7 @@ private:
     mutable std::mutex GlobalLock;
     std::atomic_bool Closed = false;
     std::atomic_bool Done = false;
-    TInstant CloseDeadline = TInstant::Now();
+    TInstant CloseDeadline = TInstant::Max();
 
     std::unique_ptr<IPartitionChooser> PartitionChooser;
 

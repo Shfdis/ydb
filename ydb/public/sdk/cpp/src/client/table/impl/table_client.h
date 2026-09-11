@@ -27,9 +27,6 @@ namespace NTable {
 //How ofter run host scan to perform session balancing
 constexpr TDeadline::Duration HOSTSCAN_PERIODIC_ACTION_INTERVAL = std::chrono::seconds(2);
 constexpr TDuration KEEP_ALIVE_CLIENT_TIMEOUT = TDuration::Seconds(5);
-// Max wait time for Drain() to complete. Sessions are being closed with 2 seconds
-// timeout each (in parallel), plus up to 10 seconds for discovery if needed.
-constexpr TDuration DRAIN_TIMEOUT = TDuration::Seconds(30);
 
 TDuration GetMinTimeToTouch(const TSessionPoolSettings& settings);
 TDuration GetMaxTimeToTouch(const TSessionPoolSettings& settings);
@@ -43,7 +40,6 @@ public:
     ~TImpl();
 
     bool LinkObjToEndpoint(const TEndpointKey& endpoint, TEndpointObj* obj, const void* tag);
-    void InitStopper();
     NThreading::TFuture<void> Drain();
     NThreading::TFuture<void> Stop();
     void ScheduleTaskUnsafe(std::function<void()>&& fn, TDeadline::Duration timeout);
@@ -186,11 +182,13 @@ private:
 
     static void CollectQuerySize(const TDataQuery&, NSdkStats::TAtomicHistogram<::NMonitoring::THistogram>&);
 
+    // NThreading futures start eagerly; referenced inputs are consumed or copied before the first suspension.
+    // NOLINTBEGIN(cppcoreguidelines-avoid-reference-coroutine-parameters)
     template <typename TQueryType, typename TParamsType>
     TAsyncDataQueryResult ExecuteDataQueryImpl(const TSession& session, const TQueryType& query,
         const TTxControl& txControl, TParamsType params,
         const TExecDataQuerySettings& settings, bool fromCache
-    ) {
+    ) { // NOLINTEND(cppcoreguidelines-avoid-reference-coroutine-parameters)
         if (!txControl.Tx_.has_value() || !txControl.CommitTx_) {
             co_return co_await AsExtractingAwaitable(ExecuteDataQueryInternal(session, query, txControl, params, settings, fromCache));
         }

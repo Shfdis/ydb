@@ -68,18 +68,16 @@ private:
         }
 
         DumpCountersContext = Connections->CreateContext();
-        if (DumpCountersContext) {
-            auto callback = [ctx = SelfContext, timeNumber](bool ok) {
-                if (ok) {
-                    if (auto borrowedSelf = ctx->LockShared()) {
-                        borrowedSelf->DumpCountersToLog(timeNumber);
-                    }
+        auto callback = [ctx = SelfContext, timeNumber](bool ok) {
+            if (ok) {
+                if (auto borrowedSelf = ctx->LockShared()) {
+                    borrowedSelf->DumpCountersToLog(timeNumber);
                 }
-            };
-            Connections->ScheduleCallback(UPDATE_PERIOD,
-                                        std::move(callback),
-                                        DumpCountersContext);
-        }
+            }
+        };
+        Connections->ScheduleCallback(UPDATE_PERIOD,
+                                    std::move(callback),
+                                    DumpCountersContext);
     }
 
     void DumpCountersToLog(size_t timeNumber = 0) {
@@ -90,16 +88,14 @@ private:
 
         {
             std::optional<TLogElement> log;
-            bool dumpHeader = true;
 
             for (auto& sessionCtx : SessionsContexts) {
                 if (auto borrowedSession = sessionCtx->LockShared()) {
                     borrowedSession->UpdateMemoryUsageStatistics();
                     if (dumpSessionsStatistics) {
-                        if (dumpHeader) {
+                        if (!log) {
                             log.emplace(&Log, TLOG_INFO);
                             (*log) << "Read/commit by partition streams (cluster:topic:partition:stream-id:read-offset:committed-offset):";
-                            dumpHeader = false;
                         }
                         borrowedSession->DumpStatisticsToLog(*log);
                     }

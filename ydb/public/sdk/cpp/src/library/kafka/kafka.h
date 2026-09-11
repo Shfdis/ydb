@@ -104,14 +104,17 @@ public:
     }
 
     const TString& value() const {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): Preserve std::optional::value()'s checked accessor contract.
         return Data.value();
     }
 
     const TString& operator*() const {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): Like std::optional, callers must first check has_value().
         return *Data;
     }
 
     const TString* operator->() const {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): Like std::optional, callers must first check has_value().
         return &*Data;
     }
 

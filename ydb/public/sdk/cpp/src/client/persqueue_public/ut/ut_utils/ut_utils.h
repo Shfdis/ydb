@@ -5,12 +5,10 @@
 #include <ydb/public/sdk/cpp/src/client/persqueue_public/include/aliases.h>
 #include <ydb/public/sdk/cpp/src/client/persqueue_public/impl/write_session.h>
 
-#include <ydb/public/sdk/cpp/src/client/topic/common/executor_impl.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/executor/executor.h>
 
 using namespace NKikimr;
 using namespace NKikimr::NPersQueueTests;
-
-using NYdb::NTopic::IAsyncExecutor;
 
 namespace NYdb::NPersQueue::NTests {
 
@@ -367,7 +365,7 @@ private:
     mutable TAdaptiveLock Lock;
 };
 
-class TYdbPqTestExecutor : public IAsyncExecutor {
+class TYdbPqTestExecutor : public IExecutor {
 public:
     TYdbPqTestExecutor(std::shared_ptr<TLockFreeQueue<ui64>> idsQueue)
         : Stop_(false)
@@ -411,13 +409,11 @@ public:
         Stop_ = true;
         Thread_.Join();
     }
-    void PostImpl(std::vector<TFunction>&& fs) override {
-        for (auto& f : fs) {
-            TasksQueue_.Enqueue(std::move(f));
-        }
+    bool IsAsync() const override {
+        return true;
     }
 
-    void PostImpl(TFunction&& f) override {
+    void Post(TFunction&& f) override {
         TasksQueue_.Enqueue(std::move(f));
     }
 

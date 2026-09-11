@@ -426,13 +426,6 @@ void TWriteSessionImpl::DoConnect(const TDuration& delay, const std::string& end
         ++ConnectionGeneration;
         auto subclient = Client->GetClientForEndpoint(endpoint);
         auto clientContext = subclient->CreateContext();
-        if (!clientContext) {
-            AbortImpl();
-            // Driver is stopping. Do not keep ClientContext: children of an
-            // existing context can still be created after TDriver::Stop, which
-            // leaves CQ Contexts_ non-empty and deadlocks Stop(true).
-            return;
-        }
         auto prevClientContext = std::exchange(ClientContext, clientContext);
 
         ServerMessage = std::make_shared<TServerMessage>();
@@ -444,18 +437,6 @@ void TWriteSessionImpl::DoConnect(const TDuration& delay, const std::string& end
         if (delay)
             connectDelayContext = ClientContext->CreateContext();
         connectTimeoutContext = ClientContext->CreateContext();
-
-        const bool missingDelayContext = delay && !connectDelayContext;
-        if (!connectContext || !connectTimeoutContext || missingDelayContext) {
-            Cancel(connectContext);
-            Cancel(connectDelayContext);
-            Cancel(connectTimeoutContext);
-            connectContext.reset();
-            connectDelayContext.reset();
-            connectTimeoutContext.reset();
-            AbortImpl();
-            return;
-        }
 
         // Previous operations contexts.
 
@@ -1050,9 +1031,10 @@ size_t TWriteSessionImpl::WriteBatchImpl() {
             block.OriginalSize += datum.size();
             block.OriginalMemoryUsage = CurrentBatch.Data.size();
             block.OriginalDataRefs.emplace_back(datum);
-            if (CurrentBatch.Messages[i].Codec.has_value()) {
+            const auto codec = CurrentBatch.Messages[i].Codec;
+            if (codec) {
                 Y_ABORT_UNLESS(CurrentBatch.Messages.size() == 1);
-                block.CodecID = GetCodecId(*CurrentBatch.Messages[i].Codec);
+                block.CodecID = GetCodecId(*codec);
                 block.OriginalSize = CurrentBatch.Messages[i].OriginalSize;
                 block.Compressed = false;
             }
@@ -1177,7 +1159,8 @@ void TWriteSessionImpl::DumpState() {
     }
     tmpPackedMessagesToSend.clear();
 
-    auto spm = std::move(SentPackedMessage);
+    decltype(SentPackedMessage) spm;
+    spm.swap(SentPackedMessage);
     s << "SentPackedMessages(" << spm.size() << "):";
     while(!spm.empty()) {
         s << " (" << spm.front().Offset << ", " << spm.front().MessageCount << ")";
@@ -1454,7 +1437,7 @@ void TWriteSessionImpl::AbortImpl() {
         ConnectTimeoutContext.reset();
         ConnectDelayContext.reset();
         Cancel(ClientContext);
-        ClientContext.reset(); // removes context from contexts set from underlying gRPC-client.
+        ClientContext.reset();
     }
 }
 

@@ -60,6 +60,8 @@ public:
         Set(other.Get());
     }
 
+    // Atomic load completes before the store, including self-assignment.
+    // NOLINTNEXTLINE(cert-oop54-cpp)
     TAtomicPointer& operator=(const TAtomicPointer& other) {
         Set(other.Get());
         return *this;

@@ -67,6 +67,7 @@ struct TWriteSessionEvent {
         TReadyToAcceptEvent(const TReadyToAcceptEvent& other) : ContinuationToken(std::move(other.ContinuationToken)) {
         }
         TReadyToAcceptEvent& operator=(TReadyToAcceptEvent&&) = default;
+        // NOLINTNEXTLINE(cert-oop54-cpp): Token move assignment is self-safe and validates consumed tokens.
         TReadyToAcceptEvent& operator=(const TReadyToAcceptEvent& other) {
             ContinuationToken = std::move(other.ContinuationToken);
             return *this;
