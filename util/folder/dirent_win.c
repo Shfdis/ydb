@@ -3,44 +3,9 @@
 #ifdef _win_
 
     #include <stdio.h>
-    #include <errno.h>
     #include "dirent_win.h"
 
-    #if defined(__MINGW32__) || defined(_DLL)
-static void SetErrno() {
-    // Neither MinGW nor the dynamic UCRT expose private CRT error mapping.
-    switch (GetLastError()) {
-        case ERROR_FILE_NOT_FOUND:
-        case ERROR_PATH_NOT_FOUND:
-        case ERROR_INVALID_DRIVE:
-        case ERROR_BAD_NETPATH:
-        case ERROR_BAD_NET_NAME:
-            errno = ENOENT;
-            break;
-        case ERROR_ACCESS_DENIED:
-        case ERROR_SHARING_VIOLATION:
-        case ERROR_LOCK_VIOLATION:
-            errno = EACCES;
-            break;
-        case ERROR_NOT_ENOUGH_MEMORY:
-        case ERROR_OUTOFMEMORY:
-            errno = ENOMEM;
-            break;
-        case ERROR_TOO_MANY_OPEN_FILES:
-            errno = EMFILE;
-            break;
-        case ERROR_DIRECTORY:
-            errno = ENOTDIR;
-            break;
-        case ERROR_FILENAME_EXCED_RANGE:
-            errno = ENAMETOOLONG;
-            break;
-        default:
-            errno = EINVAL;
-            break;
-    }
-}
-    #elif defined(_MSC_VER) && (_MSC_VER < 1900)
+    #if defined(_MSC_VER) && (_MSC_VER < 1900)
 void __cdecl _dosmaperr(unsigned long);
 
 static void SetErrno() {

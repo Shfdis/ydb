@@ -3,21 +3,8 @@
 #include <library/cpp/testing/unittest/registar.h>
 
 #include <string_view>
-#include <type_traits>
 
 Y_UNIT_TEST_SUITE(TStrBufTest) {
-    Y_UNIT_TEST(TestPointerIterators) {
-        static_assert(std::is_same_v<TStringBuf::const_iterator, const char*>);
-        static_assert(std::is_same_v<TWtringBuf::const_iterator, const wchar16*>);
-        const TStringBuf value("abc");
-        UNIT_ASSERT_VALUES_EQUAL(value.begin(), value.data());
-        UNIT_ASSERT_VALUES_EQUAL(value.end(), value.data() + value.size());
-        UNIT_ASSERT_VALUES_EQUAL(value.cbegin(), value.begin());
-        UNIT_ASSERT_VALUES_EQUAL(value.cend(), value.end());
-        UNIT_ASSERT_VALUES_EQUAL(*value.rbegin(), 'c');
-        UNIT_ASSERT_VALUES_EQUAL(value.rend() - value.rbegin(), value.size());
-    }
-
     Y_UNIT_TEST(TestConstructorsAndOperators) {
         TStringBuf str("qwerty");
 

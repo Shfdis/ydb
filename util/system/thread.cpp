@@ -553,7 +553,7 @@ TCurrentThreadLimits::TCurrentThreadLimits() noexcept
 #elif defined(_darwin_)
     StackBegin = pthread_get_stackaddr_np(pthread_self());
     StackLength = pthread_get_stacksize_np(pthread_self());
-#elif defined(_win_)
+#elif defined(_MSC_VER)
 
     #if _WIN32_WINNT >= _WIN32_WINNT_WIN8
     ULONG_PTR b = 0;

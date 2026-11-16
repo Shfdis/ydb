@@ -1,7 +1,5 @@
 #include "guid.h"
 
-#include <bit>
-
 #include <library/cpp/yt/exception/exception.h>
 
 #include <util/random/random.h>
@@ -132,7 +130,7 @@ char* WriteGuidToBuffer(char* ptr, TGuid value)
     // avoids the long branch cascade of the naive per-magnitude approach and
     // writes exactly as many bytes as the component requires.
     auto writeComponent = [&] (ui32 x) {
-        int digits = x == 0 ? 1 : (35 - std::countl_zero(x)) >> 2;
+        int digits = x == 0 ? 1 : (35 - __builtin_clz(x)) >> 2;
         char* start = ptr;
         char* cursor = ptr + digits;
         ptr = cursor;

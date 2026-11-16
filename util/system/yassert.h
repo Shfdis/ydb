@@ -22,7 +22,7 @@
     #include <cassert>
 #endif
 
-#if !defined(_MSC_VER) && !defined(__MINGW32__)
+#if !defined(_MSC_VER)
     #if defined(__has_builtin) && __has_builtin(__debugbreak)
     // Do nothing, use __debugbreak builtin
     #elif defined(__has_builtin) && __has_builtin(__builtin_debugtrap)
@@ -43,7 +43,7 @@ inline bool YaIsDebuggerPresent() {
     return false;
 }
 #else
-// MSVC and MinGW provide __debugbreak.
+// __debugbreak is intrinsic in MSVC
 
 extern "C" {
     __declspec(dllimport) int __stdcall IsDebuggerPresent();

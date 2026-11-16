@@ -40,14 +40,12 @@ void FileTimeToTimespec(const FILETIME& ft, struct timespec* ts) {
         (ntTime.FTScalar % NUMBER_OF_100_NANO_IN_SECOND) * LL(100));
 }
 
-#ifndef __MINGW32__
 int gettimeofday(timeval* tp, void*) {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
     FileTimeToTimeval(&ft, tp);
     return 0;
 }
-#endif
 
 tm* localtime_r(const time_t* clock, tm* result) {
     tzset();

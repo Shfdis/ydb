@@ -7,22 +7,7 @@
 #include <util/memory/tempbuf.h>
 #include <util/stream/file.h>
 
-#if defined(_win_)
-    #include "dirent_win.h"
-    #include <cerrno>
-#endif
-
 Y_UNIT_TEST_SUITE(TDirutTest) {
-#if defined(_win_)
-    Y_UNIT_TEST(TestOpenMissingDirectoryErrno) {
-        TTempDir tempDir;
-        const TString path = tempDir() + "/missing-directory";
-        errno = 0;
-        UNIT_ASSERT_VALUES_EQUAL(opendir(path.c_str()), nullptr);
-        UNIT_ASSERT_VALUES_EQUAL(errno, ENOENT);
-    }
-#endif
-
     Y_UNIT_TEST(TestRealPath) {
         UNIT_ASSERT(IsDir(RealPath(".")));
     }

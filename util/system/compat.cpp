@@ -14,7 +14,7 @@ const char* getprogname() {
 }
 #endif
 
-#if defined(_win_) && !defined(__MINGW32__)
+#ifdef _win_
 
 void sleep(i64 len) {
     Sleep((unsigned long)len * 1000);

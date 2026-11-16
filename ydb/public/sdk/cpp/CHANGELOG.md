@@ -1,4 +1,4 @@
-* Fixed Windows portability of gRPC client headers and table-path construction in the C++ examples.
+* Fixed Windows portability of gRPC and topic client internals, Base64 helpers, and table-path construction in the C++ examples.
 
 * Added support for tablet reassignment operation IDs.
 

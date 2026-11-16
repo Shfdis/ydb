@@ -6,7 +6,7 @@
 
 #include <csignal>
 
-#if defined(_unix_) || defined(__MINGW32__)
+#if defined(_unix_)
     #include <unistd.h>
 #endif
 
@@ -16,9 +16,7 @@
 
 extern "C" {
 #if defined(_win_)
-    #if !defined(__MINGW32__)
     using pid_t = int;
-    #endif
 
     inline unsigned int alarm(unsigned int /*seconds*/) {
         return 0; // no alarm is currently set :)
@@ -38,7 +36,7 @@ extern "C" {
     const char* getprogname();
 #endif
 
-#if defined(_win_)
+#if defined(_MSC_VER)
     void warn(const char* m, ...);
     void warnx(const char* m, ...);
     void vwarnx(const char* format, va_list ap);
@@ -65,7 +63,8 @@ extern "C" {
     #define NAME_MAX PATH_MAX
 #endif
 
-#if defined(_win_) && !defined(__MINGW32__)
+#ifdef _win_
+
     #ifdef sleep // may be defined by perl
         #undef sleep
     #endif
@@ -75,7 +74,7 @@ void usleep(i64 len);
 
 #endif
 
-#if defined(_win_) && !defined(__MINGW32__)
+#ifdef _win_
 int ftruncate(int fd, i64 length);
 int truncate(const char* name, i64 length);
 #endif
