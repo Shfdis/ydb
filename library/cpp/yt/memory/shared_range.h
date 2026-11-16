@@ -2,6 +2,7 @@
 
 #include "public.h"
 #include "intrusive_ptr.h"
+#include "new.h"
 #include "range.h"
 #include "ref_counted.h"
 

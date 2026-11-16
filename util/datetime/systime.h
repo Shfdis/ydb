@@ -25,7 +25,11 @@ void FileTimeToTimeval(const FILETIME* ft, struct timeval* tv);
 void FileTimeToTimespec(const FILETIME& ft, struct timespec* ts);
 
 // Obtain the current time, expressed as seconds and microseconds since 00:00 UTC, January 1, 1970
+#if defined(__MINGW32__)
+    #include <sys/time.h>
+#else
 int gettimeofday(struct timeval* tp, void*);
+#endif
 
 // You should not mix these with non-_r functions
 tm* localtime_r(const time_t* clock, tm* result);

@@ -13,8 +13,11 @@
 
 #include <string.h>
 
-#if defined(_x86_) && !defined(_win_)
-static ui64 _xgetbv(ui32 xcr) {
+#if defined(_x86_)
+static ui64 ReadXcr(ui32 xcr) {
+    #if defined(_MSC_VER)
+    return _xgetbv(xcr);
+    #else
     ui32 eax;
     ui32 edx;
     __asm__ volatile(
@@ -22,12 +25,13 @@ static ui64 _xgetbv(ui32 xcr) {
         : "=a"(eax), "=d"(edx)
         : "c"(xcr));
     return (static_cast<ui64>(edx) << 32) | eax;
+    #endif
 }
 #endif
 
 bool NX86::CpuId(ui32 op, ui32 subOp, ui32* res) noexcept {
 #if defined(_x86_)
-    #if defined(_MSC_VER)
+    #if defined(_win_)
     static_assert(sizeof(int) == sizeof(ui32), "ups, something wrong here");
     __cpuidex((int*)res, op, subOp);
     #else
@@ -46,7 +50,7 @@ bool NX86::CpuId(ui32 op, ui32 subOp, ui32* res) noexcept {
 
 bool NX86::CpuId(ui32 op, ui32* res) noexcept {
 #if defined(_x86_)
-    #if defined(_MSC_VER)
+    #if defined(_win_)
     static_assert(sizeof(int) == sizeof(ui32), "ups, something wrong here");
     __cpuid((int*)res, op);
     #else
@@ -143,7 +147,7 @@ bool NX86::HaveAVX() noexcept {
     // http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf
     // https://bugs.chromium.org/p/chromium/issues/detail?id=375968
     return HaveOSXSAVE()                           // implies HaveXSAVE()
-           && (_xgetbv(0) & 6u) == 6u              // XMM state and YMM state are enabled by OS
+           && (ReadXcr(0) & 6u) == 6u              // XMM state and YMM state are enabled by OS
            && ((TX86CpuInfo(0x1).ECX >> 28) & 1u); // AVX bit
 #else
     return false;
@@ -170,8 +174,8 @@ bool NX86::HaveAVX512F() noexcept {
 #if defined(_x86_)
     // https://software.intel.com/en-us/articles/how-to-detect-knl-instruction-support
     return HaveOSXSAVE()                              // implies HaveXSAVE()
-           && (_xgetbv(0) & 6u) == 6u                 // XMM state and YMM state are enabled by OS
-           && ((_xgetbv(0) >> 5) & 7u) == 7u          // ZMM state is enabled by OS
+           && (ReadXcr(0) & 6u) == 6u                 // XMM state and YMM state are enabled by OS
+           && ((ReadXcr(0) >> 5) & 7u) == 7u          // ZMM state is enabled by OS
            && TX86CpuInfo(0x0).EAX >= 0x7             // leaf 7 is present
            && ((TX86CpuInfo(0x7, 0).EBX >> 16) & 1u); // AVX512F bit
 #else
