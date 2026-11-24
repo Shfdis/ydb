@@ -55,9 +55,11 @@ public:
 
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
-    TEvStateStorage::TEvBoardInfo::EStatus Status;
+    TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
 
 public:
+    TCachedMessageData() = default;
+
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
                         const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& infoEntries,
                         const TBridgeInfo::TPtr& bridgeInfo = nullptr,
@@ -82,7 +84,7 @@ public:
         UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
     }
 
-    bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
+    void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
 
     void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
                         const TBridgeInfo::TPtr& bridgeInfo,
@@ -104,8 +106,7 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId,
-    TMonotonic waitUntil = TMonotonic::Zero());
+    const TActorId& cacheId, bool subscribe = false);
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

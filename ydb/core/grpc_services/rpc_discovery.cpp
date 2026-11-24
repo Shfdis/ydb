@@ -26,6 +26,8 @@ class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     THolder<TEvListEndpointsRequest> Request;
     const TActorId CacheId;
     TActorId Discoverer;
+    bool Subscribed = false;
+    bool Waiting = false;
 
     THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
     THolder<TEvInterconnect::TEvNodeInfo> NameserviceResponse;
@@ -44,18 +46,18 @@ public:
     {}
 
     void Bootstrap() {
-        TMonotonic waitUntil = TMonotonic::Zero();
-        if (Request->GetProtoRequest()->wait_for_change() && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
-            waitUntil = TActivationContext::Monotonic() + TDuration::Seconds(30);
+        Subscribed = Request->GetProtoRequest()->wait_for_change() && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
+        if (Subscribed) {
+            Waiting = true;
+            Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup);
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
-                system->Send(new IEventHandle(self, {}, new TEvents::TEvPoisonPill));
+                system->Send(self, new TEvents::TEvPoisonPill);
             });
         }
-
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId, waitUntil));
+            SelfId(), CacheId, Subscribed));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -78,12 +80,21 @@ public:
             hFunc(TEvInterconnect::TEvNodeInfo, Handle);
             hFunc(TEvDiscovery::TEvError, Handle);
             sFunc(TEvents::TEvPoison, PassAway);
+            sFunc(TEvents::TEvWakeup, Wakeup);
         }
     }
 
-    void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
-        Discoverer = {};
+    void Wakeup() {
+        Waiting = false;
+        TryReplyAndDie();
+    }
 
+    void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
+        if (!Subscribed) {
+            Discoverer = {};
+        } else if (LookupResponse) {
+            Waiting = false;
+        }
         LookupResponse.Reset(ev->Release().Release());
         TryReplyAndDie();
     }
@@ -133,7 +144,7 @@ public:
     }
 
     void TryReplyAndDie() {
-        if (!NameserviceResponse || !LookupResponse)
+        if (Waiting || !NameserviceResponse || !LookupResponse)
             return;
 
         Y_ABORT_UNLESS(LookupResponse->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);

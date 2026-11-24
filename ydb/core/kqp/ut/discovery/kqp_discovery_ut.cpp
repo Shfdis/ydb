@@ -32,47 +32,23 @@ void ValidateDiscovererResponse(TTestActorRuntime& runtime, TActorId edge) {
 }
 
 Y_UNIT_TEST_SUITE(Discovery) {
-    Y_UNIT_TEST(LongPollDeadlineAndBoardUpdate) {
-        TKikimrRunner kikimr(TKikimrSettings{}.SetUseRealThreads(false));
+    Y_UNIT_TEST(WatchEndpointBoard) {
+        TKikimrRunner kikimr(TKikimrSettings{});
         auto& runtime = *kikimr.GetTestServer().GetRuntime();
         const auto edge = runtime.AllocateEdgeActor();
-        const auto cache = runtime.Register(CreateDiscoveryCache({}, edge));
-        runtime.EnableScheduleForActor(cache);
-        auto getNode = runtime.GrabEdgeEvent<TEvInterconnect::TEvGetNode>(edge)->Release();
-        runtime.Send(GetNameserviceActorId(), edge, getNode.Release());
-        auto node = runtime.GrabEdgeEvent<TEvInterconnect::TEvNodeInfo>(edge)->Release();
-        runtime.Send(cache, edge, node.Release());
-
-        const auto path = MakeEndpointsBoardPath("/Root/long-poll-test");
-        const auto lookup = [&](TMonotonic deadline) {
-            runtime.Register(CreateDiscoverer([path](const TString&) { return path; },
-                "/Root", true, edge, cache, deadline));
-        };
-        using TBoard = TEvStateStorage::TEvBoardInfo;
-        auto board = MakeHolder<TBoard>(TBoard::EStatus::Ok, path);
-        NKikimrStateStorage::TEndpointBoardEntry endpoint;
-        endpoint.SetAddress("a");
-        endpoint.SetPort(2135);
-        board->InfoEntries[edge].Payload = endpoint.SerializeAsString();
-        runtime.Send(cache, edge, board.Release());
-
-        const auto deadline = runtime.GetCurrentMonotonicTime() + TDuration::Seconds(2);
-        lookup(deadline);
-        auto reply = runtime.GrabEdgeEvent<TEvDiscovery::TEvDiscoveryData>(edge, TDuration::Seconds(10));
-        UNIT_ASSERT(reply);
-        UNIT_ASSERT(runtime.GetCurrentMonotonicTime() >= deadline);
-        auto result = UnpackDiscoveryData(reply->Get()->CachedMessage);
-        UNIT_ASSERT(result.allow_long_polling());
-        UNIT_ASSERT_VALUES_EQUAL(result.endpoints(0).address(), "a");
-
-        lookup(runtime.GetCurrentMonotonicTime() + TDuration::Seconds(30));
-        UNIT_ASSERT(!runtime.GrabEdgeEvent<TEvDiscovery::TEvDiscoveryData>(edge, TDuration::MilliSeconds(150)));
-        auto update = MakeHolder<TEvStateStorage::TEvBoardInfoUpdate>(TBoard::EStatus::Ok, path);
-        update->Updates[edge].Dropped = true;
-        runtime.Send(cache, edge, update.Release());
-        reply = runtime.GrabEdgeEvent<TEvDiscovery::TEvDiscoveryData>(edge, TDuration::Seconds(10));
-        UNIT_ASSERT(reply);
-        UNIT_ASSERT_VALUES_EQUAL(UnpackDiscoveryData(reply->Get()->CachedMessage).endpoints_size(), 0);
+        const TString path = MakeEndpointsBoardPath("/Root/test-watch");
+        const auto publisher = runtime.Register(CreateBoardPublishActor(path, "endpoint", edge, 0, true));
+        const auto watch = runtime.Register(CreateDiscoverer([path](const TString&) { return path; },
+            "/Root", false, edge, {}, true));
+        using TData = TEvDiscovery::TEvDiscoveryData;
+        UNIT_ASSERT(runtime.GrabEdgeEventIf<TData>(edge, [](const auto& ev) {
+            return ev->Get()->InfoEntries.size() == 1;
+        }, TDuration::Seconds(10)));
+        runtime.Send(publisher, edge, new TEvents::TEvPoisonPill);
+        auto empty = runtime.GrabEdgeEvent<TData>(edge, TDuration::Seconds(10));
+        UNIT_ASSERT(empty && empty->Get()->InfoEntries.empty());
+        UNIT_ASSERT_EQUAL(empty->Get()->Status, TEvStateStorage::TEvBoardInfo::EStatus::Ok);
+        runtime.Send(watch, edge, new TEvents::TEvPoisonPill);
     }
 
     Y_UNIT_TEST(DelayedNameserviceResponse) {
