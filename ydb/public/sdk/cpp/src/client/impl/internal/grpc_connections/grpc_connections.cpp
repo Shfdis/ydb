@@ -796,7 +796,8 @@ NThreading::TFuture<void> TGRpcConnectionsImpl::WatchEndpoints(std::weak_ptr<TDb
         if (!state) {
             co_return;
         }
-        auto result = MutateDiscovery({std::move(snapshot), {}}, state.get());
+        TPlainStatus status(EStatus::SUCCESS, {}, state->DiscoveryEndpoint, {});
+        auto result = MutateDiscovery({std::move(snapshot), std::move(status)}, state.get());
         if (!result.DiscoveryStatus.Ok()) {
             reader->Cancel();
             break;
@@ -821,6 +822,7 @@ NThreading::TFuture<void> TGRpcConnectionsImpl::WatchEndpoints(std::weak_ptr<TDb
     state.reset();
     if (co_await ScheduleFuture(TDuration::Seconds(1), context)) {
         if (auto live = weak.lock()) {
+            live->CancelDiscoveryStream = {};
             live->EndpointPool.Expire();
             live->Streaming = false;
         }
