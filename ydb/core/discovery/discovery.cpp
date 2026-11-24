@@ -581,6 +581,9 @@ public:
     void PassAway() override {
         if (BoardLookup) {
             Send(BoardLookup, new TEvents::TEvPoisonPill);
+            if (Subscription->BridgeInfo) {
+                Send(MakeBlobStorageNodeWardenID(SelfId().NodeId()), new TEvents::TEvUnsubscribe);
+            }
         }
         TActorBootstrapped<TDiscoverer>::PassAway();
     }
@@ -626,6 +629,12 @@ public:
     }
 
     void Handle(TEvNodeWardenStorageConfig::TPtr& ev) {
+        if (Subscription->BridgeInfo == ev->Get()->BridgeInfo) {
+            return;
+        }
+        if (!Subscription->BridgeInfo) {
+            Send(MakeBlobStorageNodeWardenID(SelfId().NodeId()), new TEvNodeWardenQueryStorageConfig(true));
+        }
         Subscription->BridgeInfo = ev->Get()->BridgeInfo;
         if (Subscription->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok) {
             Publish(Subscription->Status);
@@ -768,7 +777,7 @@ public:
         if (Subscription) {
             BoardLookup = Register(CreateBoardLookupActor(reqPath, SelfId(), EBoardLookupMode::Subscription));
             if (IsBridgeMode(ActorContext())) {
-                Send(MakeBlobStorageNodeWardenID(SelfId().NodeId()), new TEvNodeWardenQueryStorageConfig(true));
+                Send(MakeBlobStorageNodeWardenID(SelfId().NodeId()), new TEvNodeWardenQueryStorageConfig(false));
             }
             return;
         }
