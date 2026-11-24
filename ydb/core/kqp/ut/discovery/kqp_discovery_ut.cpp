@@ -37,17 +37,19 @@ Y_UNIT_TEST_SUITE(Discovery) {
         auto& runtime = *kikimr.GetTestServer().GetRuntime();
         const auto edge = runtime.AllocateEdgeActor();
         const TString path = MakeEndpointsBoardPath("/Root/test-watch");
-        const auto publisher = runtime.Register(CreateBoardPublishActor(path, "endpoint", edge, 0, true));
         const auto watch = runtime.Register(CreateDiscoverer([path](const TString&) { return path; },
             "/Root", false, edge, {}, true));
-        using TData = TEvDiscovery::TEvDiscoveryData;
-        UNIT_ASSERT(runtime.GrabEdgeEventIf<TData>(edge, [](const auto& ev) {
-            return ev->Get()->InfoEntries.size() == 1;
-        }, TDuration::Seconds(10)));
+        auto expectEndpoints = [&](size_t count) {
+            auto event = runtime.GrabEdgeEvent<TEvDiscovery::TEvDiscoveryData>(edge, TDuration::Seconds(10));
+            UNIT_ASSERT(event);
+            UNIT_ASSERT_EQUAL(event->Get()->Status, TEvStateStorage::TEvBoardInfo::EStatus::Ok);
+            UNIT_ASSERT_VALUES_EQUAL(event->Get()->InfoEntries.size(), count);
+        };
+        expectEndpoints(0);
+        const auto publisher = runtime.Register(CreateBoardPublishActor(path, "endpoint", edge, 0, true));
+        expectEndpoints(1);
         runtime.Send(publisher, edge, new TEvents::TEvPoisonPill);
-        auto empty = runtime.GrabEdgeEvent<TData>(edge, TDuration::Seconds(10));
-        UNIT_ASSERT(empty && empty->Get()->InfoEntries.empty());
-        UNIT_ASSERT_EQUAL(empty->Get()->Status, TEvStateStorage::TEvBoardInfo::EStatus::Ok);
+        expectEndpoints(0);
         runtime.Send(watch, edge, new TEvents::TEvPoisonPill);
     }
 
