@@ -1,6 +1,8 @@
 #define INCLUDE_YDB_INTERNAL_H
 #include "grpc_connections.h"
 
+#include <library/cpp/threading/future/core/coroutine_traits.h>
+
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/exceptions/exceptions.h>
 #include <ydb/public/sdk/cpp/src/client/impl/observability/constants.h>
 
@@ -761,6 +763,68 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         }
         return NThreading::MakeFuture<TListEndpointsResult>(MutateDiscovery(std::move(result), strong.get()));
     });
+}
+
+NThreading::TFuture<void> TGRpcConnectionsImpl::WatchEndpoints(std::weak_ptr<TDbDriverState> weak) {
+    using TService = Ydb::Discovery::V1::DiscoveryService;
+    using TRequest = Ydb::Discovery::ListEndpointsRequest;
+    using TResult = Ydb::Discovery::ListEndpointsResult;
+    using TReader = NYdbGrpc::IStreamRequestReadProcessor<TResult>::TPtr;
+
+    auto state = weak.lock();
+    auto context = CreateContext();
+    if (!state || !context) {
+        co_return;
+    }
+    state->CancelDiscoveryStream = [context] { context->Cancel(); };
+    TRequest request;
+    request.set_database(TStringType{state->Database});
+    auto opened = NThreading::NewPromise<TReader>();
+    StartReadStream<TService, TRequest, TResult>(request,
+        [opened](TPlainStatus, TReader reader) mutable { opened.SetValue(std::move(reader)); },
+        &TService::Stub::AsyncStreamListEndpoints, state, {}, context);
+    state.reset();
+    auto reader = co_await opened.GetFuture();
+    while (reader && !context->IsCancelled()) {
+        TResult snapshot;
+        auto read = NThreading::NewPromise<bool>();
+        reader->Read(&snapshot, [read](NYdbGrpc::TGrpcStatus&& status) mutable { read.SetValue(status.Ok()); });
+        if (!(co_await read.GetFuture())) {
+            break;
+        }
+        state = weak.lock();
+        if (!state) {
+            co_return;
+        }
+        auto result = MutateDiscovery({std::move(snapshot), {}}, state.get());
+        if (!result.DiscoveryStatus.Ok()) {
+            reader->Cancel();
+            break;
+        }
+        // Finish any unary refresh started before the stream took over.
+        for (;;) {
+            auto [updated, first] = state->EndpointPool.UpdateAsync([&result] {
+                return NThreading::MakeFuture(std::move(result));
+            });
+            auto update = co_await updated;
+            if (first) {
+#ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
+                DeleteChannels(update.Removed);
+#else
+                Y_UNUSED(update);
+#endif
+                break;
+            }
+        }
+        state.reset();
+    }
+    state.reset();
+    if (co_await ScheduleFuture(TDuration::Seconds(1), context)) {
+        if (auto live = weak.lock()) {
+            live->EndpointPool.Expire();
+            live->Streaming = false;
+        }
+    }
 }
 
 TListEndpointsResult TGRpcConnectionsImpl::MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState) {

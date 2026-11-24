@@ -28,6 +28,7 @@ struct TListEndpointsResult;
 class IInternalClient {
 public:
     virtual NThreading::TFuture<TListEndpointsResult> GetEndpoints(std::shared_ptr<TDbDriverState> dbState) = 0;
+    virtual NThreading::TFuture<void> WatchEndpoints(std::weak_ptr<TDbDriverState> state) = 0;
     virtual void AddPeriodicTask(TPeriodicCb&& cb, TDeadline::Duration period) = 0;
     virtual void PostToResponseQueue(std::function<void()>&& f) = 0;
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL

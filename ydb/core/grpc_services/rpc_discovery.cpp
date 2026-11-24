@@ -3,6 +3,7 @@
 #include "rpc_calls.h"
 #include "rpc_kqp_base.h"
 
+#include <ydb/core/base/appdata.h>
 #include <ydb/core/base/location.h>
 #include <ydb/core/discovery/discovery.h>
 
@@ -23,6 +24,8 @@ using namespace NKqp;
 
 class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     THolder<TEvListEndpointsRequest> Request;
+    const bool Streaming;
+    bool WritePending = false;
     const TActorId CacheId;
     TActorId Discoverer;
 
@@ -38,15 +41,29 @@ public:
 
     TListEndpointsRPC(TEvListEndpointsRequest::TPtr &msg, TActorId cacheId)
         : Request(msg->Release().Release())
+        , Streaming(dynamic_cast<TEvStreamListEndpointsRequest*>(Request.Get()) != nullptr)
         , CacheId(cacheId)
         , Span(TWilsonGrpc::RequestActor, Request->GetWilsonTraceId(), "ListEndpointsRpc")
     {}
 
     void Bootstrap() {
+        if (Streaming) {
+            if (!AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+                Request->ReplyWithRpcStatus(grpc::StatusCode::UNIMPLEMENTED, "Endpoint subscriptions disabled", {});
+                return PassAway();
+            }
+            auto* system = TActivationContext::ActorSystem();
+            Request->SetFinishAction([system, self = SelfId()] { system->Send(self, new TEvents::TEvPoisonPill); });
+            Request->SetStreamingNotify([system, self = SelfId()](size_t queued) {
+                if (!queued) {
+                    system->Send(self, new TEvents::TEvWakeup);
+                }
+            });
+        }
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId));
+            SelfId(), CacheId, Streaming));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -68,11 +85,23 @@ public:
             hFunc(TEvDiscovery::TEvDiscoveryData, Handle);
             hFunc(TEvInterconnect::TEvNodeInfo, Handle);
             hFunc(TEvDiscovery::TEvError, Handle);
+            sFunc(TEvents::TEvPoison, PassAway);
+            sFunc(TEvents::TEvWakeup, WriteDone);
         }
     }
 
+    void WriteDone() {
+        WritePending = false;
+        TryReplyAndDie();
+    }
+
     void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
-        Discoverer = {};
+        if (!Streaming) {
+            Discoverer = {};
+        } else if (LookupResponse) {
+            Request->ReplyWithRpcStatus(grpc::StatusCode::RESOURCE_EXHAUSTED, "Discovery reader fell behind", {});
+            return PassAway();
+        }
 
         LookupResponse.Reset(ev->Release().Release());
         TryReplyAndDie();
@@ -123,7 +152,7 @@ public:
     }
 
     void TryReplyAndDie() {
-        if (!NameserviceResponse || !LookupResponse)
+        if (WritePending || !NameserviceResponse || !LookupResponse)
             return;
 
         Y_ABORT_UNLESS(LookupResponse->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);
@@ -142,7 +171,7 @@ public:
             NDiscovery::TCachedMessageData cachedMessageData(
                 LookupResponse->InfoEntries,
                 NameserviceResponse, LookupResponse->BridgeInfo,
-                endpointId, services);
+                endpointId, services, LookupResponse->Status, Streaming);
 
             cachedMessage = std::move(cachedMessageData.CachedMessage);
             cachedMessageSsl = std::move(cachedMessageData.CachedMessageSsl);
@@ -157,7 +186,12 @@ public:
 
     void ReplySerialized(TString message, Ydb::StatusIds::StatusCode status) {
         Request->SendSerializedResult(std::move(message), status);
-        PassAway();
+        if (Streaming) {
+            WritePending = true;
+            LookupResponse.Reset();
+        } else {
+            PassAway();
+        }
     }
 
     void Reply(Ydb::StatusIds::StatusCode status) {

@@ -55,9 +55,11 @@ public:
 
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
-    TEvStateStorage::TEvBoardInfo::EStatus Status;
+    TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
 
 public:
+    TCachedMessageData() = default;
+
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
                         const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& infoEntries,
                         const TBridgeInfo::TPtr& bridgeInfo = nullptr,
@@ -74,12 +76,13 @@ public:
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
                         const TSet<TString>& services = {},
-                        TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok)
+                        TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok,
+                        bool bareResult = false)
         : InfoEntries(std::move(infoEntries))
         , BridgeInfo(bridgeInfo)
         , Status(status)
     {
-        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
+        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services, bareResult);
     }
 
     void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
@@ -87,9 +90,9 @@ public:
     void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
-                        const TSet<TString>& services = {});
+                        const TSet<TString>& services = {}, bool bareResult = false);
 
-    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage) const;
+    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool allowEmpty = false) const;
 };
 
 }
@@ -104,7 +107,7 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId);
+    const TActorId& cacheId, bool subscribe = false);
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

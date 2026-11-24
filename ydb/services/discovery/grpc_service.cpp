@@ -40,6 +40,10 @@ void TGRpcDiscoveryService::SetupIncomingRequests(NYdbGrpc::TLoggerPtr logger) {
          ActorSystem_->Send(GRpcRequestProxyId_, new TEvListEndpointsRequest(reqCtx));
      });
 
+     SETUP_LEGACY_EVENT_METHOD(StreamListEndpoints, ListEndpointsRequest, ListEndpointsResult, {
+         ActorSystem_->Send(GRpcRequestProxyId_, new TEvStreamListEndpointsRequest(reqCtx));
+     });
+
 #undef SETUP_DISCOVERY_METHOD
 #undef SETUP_LEGACY_EVENT_METHOD
  }

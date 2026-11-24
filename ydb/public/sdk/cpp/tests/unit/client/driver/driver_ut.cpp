@@ -14,6 +14,7 @@
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
+#include <grpcpp/support/sync_stream.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/testing/unittest/tests_data.h>
@@ -374,6 +375,41 @@ not-base64
         for (auto& t : ValidTokens) {
             UNIT_ASSERT_EQUAL(checkToken(t), EStatus::TRANSPORT_UNAVAILABLE);
         }
+    }
+
+    Y_UNIT_TEST(StreamListEndpointsUpdatesTheDriver) {
+        TPortManager ports;
+        TMockTableService table;
+        const auto tablePort = ports.GetPort();
+        auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
+        struct TDiscovery : TMockDiscoveryService {
+            Ydb::Discovery::ListEndpointsResult Replacement;
+            grpc::Status StreamListEndpoints(grpc::ServerContext*, const Ydb::Discovery::ListEndpointsRequest* request,
+                    grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
+                if (request->database() != "/Root") {
+                    return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
+                }
+                writer->Write({});
+                writer->Write(Replacement);
+                return grpc::Status::OK;
+            }
+        } discovery;
+        discovery.MockResults["/Root"].set_use_stream_list_endpoints(true);
+        auto* endpoint = discovery.Replacement.add_endpoints();
+        endpoint->set_address("127.0.0.1");
+        endpoint->set_port(tablePort);
+        const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
+        auto discoveryServer = StartGrpcServer(address, discovery);
+        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root"));
+        TTableClient client(driver);
+        const auto deadline = TInstant::Now() + TDuration::Seconds(10);
+        do {
+            if (client.CreateSession().GetValueSync().IsSuccess()) {
+                return;
+            }
+            Sleep(TDuration::MilliSeconds(10));
+        } while (TInstant::Now() < deadline);
+        UNIT_FAIL("The endpoint from StreamListEndpoints was not installed");
     }
 
     Y_UNIT_TEST(UsingIpAddresses) {

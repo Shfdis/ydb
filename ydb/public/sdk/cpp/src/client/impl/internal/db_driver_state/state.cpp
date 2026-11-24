@@ -59,6 +59,25 @@ TDbDriverState::TDbDriverState(
     Log.SetFormatter(GetPrefixLogFormatter(GetDatabaseLogPrefix(Database)));
 }
 
+TDbDriverState::~TDbDriverState() {
+    if (CancelDiscoveryStream) {
+        CancelDiscoveryStream();
+    }
+}
+
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::UpdateEndpoints() {
+    auto update = EndpointPool.UpdateAsync();
+    if (update.second) {
+        update.first.Subscribe([self = shared_from_this()](const auto& future) {
+            const auto& result = future.GetValue();
+            if (result.DiscoveryStatus.Ok() && result.UseStream && !self->Streaming.exchange(true)) {
+                self->Client->WatchEndpoints(self);
+            }
+        });
+    }
+    return update;
+}
+
 void TDbDriverState::InitCredentials(
     std::shared_ptr<ICredentialsProviderFactory> credentialsProviderFactory
 ) {
@@ -142,7 +161,7 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
         TDbDriverState::TPtr strong = weak.lock();
         if (!strong) {
             return false;
-        } else {
+        } else if (!strong->Streaming) {
 
             bool pessThreshold = strong->EndpointPool.GetPessimizationRatio() > PESSIMIZATION_DISCOVERY_THRESHOLD;
             bool expiration = strong->EndpointPool.TimeSinceLastUpdate() > ENDPOINT_UPDATE_PERIOD;
@@ -155,7 +174,7 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
             }
 
             if (pessThreshold || expiration) {
-                auto asyncResult = strong->EndpointPool.UpdateAsync();
+                auto asyncResult = strong->UpdateEndpoints();
                 // true - we were first who run UpdateAsync
                 if (asyncResult.second) {
                     auto cb = [strong](const NThreading::TFuture<TEndpointUpdateResult>& future) {
@@ -271,7 +290,7 @@ TDbDriverStatePtr TDbDriverStateTracker::GetDriverState(
     }
 
     if (strongState->DiscoveryMode != EDiscoveryMode::Off) {
-        auto updateResult = strongState->EndpointPool.UpdateAsync();
+        auto updateResult = strongState->UpdateEndpoints();
         if (updateResult.second) {
             auto cb = [strongState](const NThreading::TFuture<TEndpointUpdateResult>&) {
                 strongState->SignalDiscoveryCompleted();

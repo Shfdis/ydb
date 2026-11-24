@@ -657,7 +657,9 @@ public:
                                     dbState->EndpointPool.BanEndpoint(endpoint.GetEndpoint());
                                 }
                             };
-                            processor->AddFinishedCallback(std::move(finishedCallback));
+                            if constexpr (!std::is_same_v<TService, Ydb::Discovery::V1::DiscoveryService>) {
+                                processor->AddFinishedCallback(std::move(finishedCallback));
+                            }
                             TPlainStatus status(std::move(grpcStatus), endpoint.GetEndpoint(), {});
                             RunGuarded(stopState,
                                 [&] { responseCb(std::move(status), std::move(processor)); },
@@ -791,6 +793,7 @@ public:
     }
 
     TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState) override;
+    NThreading::TFuture<void> WatchEndpoints(std::weak_ptr<TDbDriverState> state) override;
     TListEndpointsResult MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState);
 
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
@@ -849,7 +852,7 @@ private:
                     TConnection{nullptr},
                     TEndpointKey{},
                     StopState_);
-            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync) {
+            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync || dbState->Streaming) {
                 TStringStream errString;
                 errString << "Endpoint list is empty for database " << dbState->Database;
                 errString << ", cluster endpoint " << dbState->DiscoveryEndpoint;
@@ -893,7 +896,7 @@ private:
                 } while (!QueuedRequests_.compare_exchange_weak(val, newVal));
 
                 // UpdateAsync guarantees one update in progress for state.
-                auto asyncResult = dbState->EndpointPool.UpdateAsync();
+                auto asyncResult = dbState->UpdateEndpoints();
                 const bool needUpdateChannels = asyncResult.second;
                 auto stopState = StopState_;
                 asyncResult.first.Subscribe([this, callback = std::move(callback), needUpdateChannels, dbState, preferredEndpoint, endpointPolicy, stopState = std::move(stopState)]

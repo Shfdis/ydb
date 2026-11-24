@@ -26,7 +26,7 @@ TEndpointPool::~TEndpointPool() {
     }
 }
 
-std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync() {
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(const TListEndpointsResultProvider& provider) {
     NThreading::TFuture<TEndpointUpdateResult> future;
     {
         std::lock_guard guard(Mutex_);
@@ -120,10 +120,10 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             std::lock_guard guard(Mutex_);
             DiscoveryPromise_.Swap(promise);
         }
-        promise.SetValue({std::move(removed), result.DiscoveryStatus});
+        promise.SetValue({std::move(removed), std::move(result.DiscoveryStatus), result.Result.use_stream_list_endpoints()});
     };
 
-    Provider_().Subscribe(handler);
+    (provider ? provider : Provider_)().Subscribe(handler);
     return {future, true};
 }
 

@@ -25,13 +25,15 @@ using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult()>;
 struct TEndpointUpdateResult {
     std::vector<std::string> Removed;
     TPlainStatus DiscoveryStatus;
+    bool UseStream;
 };
 
 class TEndpointPool {
 public:
     TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client);
     ~TEndpointPool();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync();
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(const TListEndpointsResultProvider& provider = {});
+    void Expire() { LastUpdateTime_ = 0; }
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);
