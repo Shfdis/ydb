@@ -117,6 +117,7 @@ SRCS(
 PEERDIR(
     contrib/libs/xxhash
     library/cpp/cgiparam
+    library/cpp/containers/stack_vector
     library/cpp/digest/old_crc
     ydb/core/actorlib_impl
     ydb/core/audit

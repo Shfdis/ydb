@@ -14,6 +14,7 @@
 #include <ydb/library/actors/interconnect/interconnect.h>
 #include <ydb/library/actors/core/hfunc.h>
 
+#include <library/cpp/containers/stack_vector/stack_vec.h>
 #include <util/random/shuffle.h>
 
 namespace NKikimr::NGRpcService {
@@ -29,7 +30,8 @@ class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     const TActorId CacheId;
     TActorId Discoverer;
 
-    THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
+    static constexpr size_t MaxPendingSnapshots = 8;
+    TStackVec<THolder<TEvDiscovery::TEvDiscoveryData>, 1> PendingSnapshots;
     THolder<TEvInterconnect::TEvNodeInfo> NameserviceResponse;
 
     NWilson::TSpan Span;
@@ -98,12 +100,12 @@ public:
     void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
         if (!Streaming) {
             Discoverer = {};
-        } else if (LookupResponse) {
+        } else if (PendingSnapshots.size() == MaxPendingSnapshots) {
             Request->ReplyWithRpcStatus(grpc::StatusCode::RESOURCE_EXHAUSTED, "Discovery reader fell behind", {});
             return PassAway();
         }
 
-        LookupResponse.Reset(ev->Release().Release());
+        PendingSnapshots.emplace_back(ev->Release().Release());
         TryReplyAndDie();
     }
 
@@ -152,10 +154,12 @@ public:
     }
 
     void TryReplyAndDie() {
-        if (WritePending || !NameserviceResponse || !LookupResponse)
+        if (WritePending || !NameserviceResponse || PendingSnapshots.empty())
             return;
 
-        Y_ABORT_UNLESS(LookupResponse->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);
+        auto response = std::move(PendingSnapshots.front());
+        PendingSnapshots.erase(PendingSnapshots.begin());
+        Y_ABORT_UNLESS(response->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);
 
         const TSet<TString> services(
             Request->GetProtoRequest()->Getservice().begin(), Request->GetProtoRequest()->Getservice().end());
@@ -164,14 +168,14 @@ public:
 
         TString endpointId = Request->GetEndpointId();
 
-        if (!LookupResponse->CachedMessage.empty() && !LookupResponse->CachedMessageSsl.empty()) {
-            cachedMessage = LookupResponse->CachedMessage;
-            cachedMessageSsl = LookupResponse->CachedMessageSsl;
+        if (!response->CachedMessage.empty() && !response->CachedMessageSsl.empty()) {
+            cachedMessage = response->CachedMessage;
+            cachedMessageSsl = response->CachedMessageSsl;
         } else {
             NDiscovery::TCachedMessageData cachedMessageData(
-                LookupResponse->InfoEntries,
-                NameserviceResponse, LookupResponse->BridgeInfo,
-                endpointId, services, LookupResponse->Status, Streaming);
+                response->InfoEntries,
+                NameserviceResponse, response->BridgeInfo,
+                endpointId, services, response->Status, Streaming);
 
             cachedMessage = std::move(cachedMessageData.CachedMessage);
             cachedMessageSsl = std::move(cachedMessageData.CachedMessageSsl);
@@ -188,7 +192,6 @@ public:
         Request->SendSerializedResult(std::move(message), status);
         if (Streaming) {
             WritePending = true;
-            LookupResponse.Reset();
         } else {
             PassAway();
         }

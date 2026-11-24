@@ -384,27 +384,40 @@ not-base64
         auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
         struct TDiscovery : TMockDiscoveryService {
             Ydb::Discovery::ListEndpointsResult Replacement;
+            NThreading::TPromise<void> Switch = NThreading::NewPromise<void>();
             grpc::Status StreamListEndpoints(grpc::ServerContext*, const Ydb::Discovery::ListEndpointsRequest* request,
                     grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
                 if (request->database() != "/Root") {
                     return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
+                }
+                writer->Write(MockResults.at("/Root"));
+                if (!Switch.GetFuture().Wait(TDuration::Seconds(10))) {
+                    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "switch timed out");
                 }
                 writer->Write({});
                 writer->Write(Replacement);
                 return grpc::Status::OK;
             }
         } discovery;
-        discovery.MockResults["/Root"].set_use_stream_list_endpoints(true);
         auto* endpoint = discovery.Replacement.add_endpoints();
-        endpoint->set_address("127.0.0.1");
+        endpoint->set_address("standby.invalid");
         endpoint->set_port(tablePort);
+        endpoint->add_ip_v4("127.0.0.1");
+        auto& initial = discovery.MockResults["/Root"];
+        initial = discovery.Replacement;
+        initial.mutable_endpoints(0)->set_ip_v4(0, "127.0.0.2");
+        initial.set_use_stream_list_endpoints(true);
         const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
         auto discoveryServer = StartGrpcServer(address, discovery);
         TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root"));
         TTableClient client(driver);
+        const auto settings = TCreateSessionSettings().ClientTimeout(TDuration::Seconds(1));
+        auto first = client.CreateSession(settings).GetValueSync();
+        discovery.Switch.SetValue();
+        UNIT_ASSERT(!first.IsSuccess());
         const auto deadline = TInstant::Now() + TDuration::Seconds(10);
         do {
-            if (client.CreateSession().GetValueSync().IsSuccess()) {
+            if (client.CreateSession(settings).GetValueSync().IsSuccess()) {
                 return;
             }
             Sleep(TDuration::MilliSeconds(10));
