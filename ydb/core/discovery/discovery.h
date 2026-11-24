@@ -82,14 +82,14 @@ public:
         UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
     }
 
-    void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
+    bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
 
     void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
                         const TSet<TString>& services = {});
 
-    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage) const;
+    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool allowEmpty = false) const;
 };
 
 }
@@ -104,7 +104,8 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId);
+    const TActorId& cacheId,
+    TMonotonic waitUntil = TMonotonic::Zero());
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

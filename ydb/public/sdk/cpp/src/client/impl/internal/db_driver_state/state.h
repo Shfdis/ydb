@@ -8,6 +8,8 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/common_client/ssl_credentials.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/core_facility/core_facility.h>
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -41,6 +43,7 @@ public:
     NThreading::TFuture<void> DiscoveryCompleted() const;
 
     void SignalDiscoveryCompleted();
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateEndpoints();
     void InitCredentials(std::shared_ptr<ICredentialsProviderFactory> credentialsProviderFactory);
     NThreading::TFuture<void> GetCredentialsReady() const;
     std::shared_ptr<ICredentialsProvider> GetCredentialsProvider() const;
@@ -66,6 +69,7 @@ public:
     const TSslCredentials SslCredentials;
     IInternalClient* Client;
     TEndpointPool EndpointPool;
+    std::atomic<bool> LongPolling{false};
     // StopCb allow client to subscribe for notifications from lower layer
     std::mutex NotifyCbsLock;
     std::array<std::vector<TCb>, static_cast<size_t>(ENotifyType::COUNT)> NotifyCbs;
@@ -77,6 +81,8 @@ public:
     NThreading::TPromise<void> DiscoveryCompletedPromise;
 
 private:
+    void ScheduleLongPoll(const TEndpointUpdateResult& result, std::chrono::milliseconds retryDelay);
+
     struct TCredentials {
         std::shared_ptr<ICredentialsProvider> Provider;
 #ifndef YDB_GRPC_UNSECURE_AUTH

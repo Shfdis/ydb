@@ -7,6 +7,7 @@
 
 #include <library/cpp/string_utils/quote/quote.h>
 
+#include <algorithm>
 #include <thread>
 #include <unordered_map>
 
@@ -40,11 +41,11 @@ TDbDriverState::TDbDriverState(
     , DiscoveryMode(discoveryMode)
     , SslCredentials(sslCredentials)
     , Client(client)
-    , EndpointPool([this, client]() mutable {
+    , EndpointPool([this, client](bool waitForChange) {
         // this callback will be called just after shared_ptr initialization
         // so this call is safe
         auto self = shared_from_this();
-        return client->GetEndpoints(self);
+        return client->GetEndpoints(self, waitForChange);
     }, client)
     , StatCollector(
         database,
@@ -132,6 +133,49 @@ void TDbDriverState::SignalDiscoveryCompleted() {
     DiscoveryCompletedPromise.TrySetValue();
 }
 
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::UpdateEndpoints() {
+    auto update = EndpointPool.UpdateAsync();
+    if (update.second) {
+        update.first.Subscribe([self = shared_from_this()](const auto& future) {
+            const auto& result = future.GetValue();
+            if (result.DiscoveryStatus.Ok() && result.AllowLongPolling && !self->LongPolling.exchange(true)) {
+                self->ScheduleLongPoll(result, 100ms);
+            }
+        });
+    }
+    return update;
+}
+
+void TDbDriverState::ScheduleLongPoll(const TEndpointUpdateResult& result, std::chrono::milliseconds retryDelay) {
+    if (result.DiscoveryStatus.Ok() && !result.AllowLongPolling) {
+        LongPolling = false;
+        return;
+    }
+    const bool wait = result.DiscoveryStatus.Ok() && !result.Empty;
+    const auto delay = wait ? 100ms : retryDelay;
+    const auto nextRetry = wait ? 100ms : std::min(2 * retryDelay, 5000ms);
+    Client->ScheduleDelayedTask([weak = weak_from_this(), wait, nextRetry] {
+        if (auto self = weak.lock()) {
+            auto [future, first] = self->EndpointPool.UpdateAsync(wait);
+            future.Subscribe([self, first, nextRetry](const auto& future) {
+                const auto& result = future.GetValue();
+#ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
+                if (first) {
+                    self->Client->DeleteChannels(result.Removed);
+                }
+#else
+                Y_UNUSED(first);
+#endif
+                {
+                    std::unique_lock guard(self->LastDiscoveryStatusRWLock);
+                    self->LastDiscoveryStatus = result.DiscoveryStatus;
+                }
+                self->ScheduleLongPoll(result, nextRetry);
+            });
+        }
+    }, delay);
+}
+
 TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
     auto weak = std::weak_ptr<TDbDriverState>(driverState);
     return [weak](NYdb::NIssue::TIssues&&, EStatus status) {
@@ -142,7 +186,7 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
         TDbDriverState::TPtr strong = weak.lock();
         if (!strong) {
             return false;
-        } else {
+        } else if (!strong->LongPolling) {
 
             bool pessThreshold = strong->EndpointPool.GetPessimizationRatio() > PESSIMIZATION_DISCOVERY_THRESHOLD;
             bool expiration = strong->EndpointPool.TimeSinceLastUpdate() > ENDPOINT_UPDATE_PERIOD;
@@ -155,7 +199,7 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
             }
 
             if (pessThreshold || expiration) {
-                auto asyncResult = strong->EndpointPool.UpdateAsync();
+                auto asyncResult = strong->UpdateEndpoints();
                 // true - we were first who run UpdateAsync
                 if (asyncResult.second) {
                     auto cb = [strong](const NThreading::TFuture<TEndpointUpdateResult>& future) {
@@ -271,7 +315,7 @@ TDbDriverStatePtr TDbDriverStateTracker::GetDriverState(
     }
 
     if (strongState->DiscoveryMode != EDiscoveryMode::Off) {
-        auto updateResult = strongState->EndpointPool.UpdateAsync();
+        auto updateResult = strongState->UpdateEndpoints();
         if (updateResult.second) {
             auto cb = [strongState](const NThreading::TFuture<TEndpointUpdateResult>&) {
                 strongState->SignalDiscoveryCompleted();

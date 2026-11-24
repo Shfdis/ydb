@@ -3,6 +3,7 @@
 #include "rpc_calls.h"
 #include "rpc_kqp_base.h"
 
+#include <ydb/core/base/appdata.h>
 #include <ydb/core/base/location.h>
 #include <ydb/core/discovery/discovery.h>
 
@@ -43,10 +44,18 @@ public:
     {}
 
     void Bootstrap() {
+        TMonotonic waitUntil = TMonotonic::Zero();
+        if (Request->GetProtoRequest()->wait_for_change() && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+            waitUntil = TActivationContext::Monotonic() + TDuration::Seconds(30);
+            Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
+                system->Send(new IEventHandle(self, {}, new TEvents::TEvPoisonPill));
+            });
+        }
+
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId));
+            SelfId(), CacheId, waitUntil));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -68,6 +77,7 @@ public:
             hFunc(TEvDiscovery::TEvDiscoveryData, Handle);
             hFunc(TEvInterconnect::TEvNodeInfo, Handle);
             hFunc(TEvDiscovery::TEvError, Handle);
+            sFunc(TEvents::TEvPoison, PassAway);
         }
     }
 

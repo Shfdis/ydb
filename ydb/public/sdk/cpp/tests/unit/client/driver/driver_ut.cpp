@@ -18,6 +18,7 @@
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/testing/unittest/tests_data.h>
 #include <util/generic/mapfindptr.h>
+#include <util/system/event.h>
 
 #include <atomic>
 #include <functional>
@@ -65,10 +66,15 @@ IGfPhGBVwOMnr+uhwtpj4PAOIrlOQD/fBsaRtYuBRdg2
             auto* op = response->mutable_operation();
             op->set_ready(true);
             op->set_status(Ydb::StatusIds::SUCCESS);
-            op->mutable_result()->PackFrom(*result);
+            auto snapshot = *result;
+            if (OnListEndpoints) {
+                OnListEndpoints(*request, snapshot);
+            }
+            op->mutable_result()->PackFrom(snapshot);
             return grpc::Status::OK;
         }
 
+        std::function<void(const Ydb::Discovery::ListEndpointsRequest&, Ydb::Discovery::ListEndpointsResult&)> OnListEndpoints;
         // From database name to result
         std::unordered_map<std::string, Ydb::Discovery::ListEndpointsResult> MockResults;
         std::string BuildInfo;
@@ -374,6 +380,54 @@ not-base64
         for (auto& t : ValidTokens) {
             UNIT_ASSERT_EQUAL(checkToken(t), EStatus::TRANSPORT_UNAVAILABLE);
         }
+    }
+
+    Y_UNIT_TEST(LongPollAfterDiscoveryAndRefreshAfterEmptyList) {
+        TPortManager ports;
+        TMockTableService table;
+        const auto tablePort = ports.GetPort();
+        auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
+
+        TManualEvent emptyApplied, resume, restored, unexpectedPoll;
+        std::mutex lock;
+        std::vector<bool> waits;
+        TMockDiscoveryService discovery;
+        auto* endpoint = discovery.MockResults["/Root"].add_endpoints();
+        endpoint->set_address("127.0.0.1");
+        endpoint->set_port(tablePort);
+        discovery.OnListEndpoints = [&](const auto& request, auto& snapshot) {
+            size_t call;
+            {
+                std::lock_guard guard(lock);
+                waits.push_back(request.wait_for_change());
+                call = waits.size();
+            }
+            snapshot.set_allow_long_polling(call < 4);
+            if (call == 2) {
+                snapshot.clear_endpoints();
+            } else if (call == 3) {
+                emptyApplied.Signal();
+                resume.WaitT(TDuration::Seconds(10));
+            } else if (call == 4) {
+                restored.Signal();
+            } else if (call > 4) {
+                unexpectedPoll.Signal();
+            }
+        };
+        const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
+        auto discoveryServer = StartGrpcServer(address, discovery);
+        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root"));
+        TTableClient client(driver);
+
+        UNIT_ASSERT(emptyApplied.WaitT(TDuration::Seconds(10)));
+        auto session = client.CreateSession().GetValueSync();
+        resume.Signal();
+        UNIT_ASSERT_VALUES_EQUAL(session.GetStatus(), EStatus::UNAVAILABLE);
+        UNIT_ASSERT(restored.WaitT(TDuration::Seconds(10)));
+        UNIT_ASSERT(client.CreateSession().GetValueSync().IsSuccess());
+        UNIT_ASSERT(!unexpectedPoll.WaitT(TDuration::MilliSeconds(500)));
+        std::lock_guard guard(lock);
+        UNIT_ASSERT(waits == std::vector<bool>({false, true, false, true}));
     }
 
     Y_UNIT_TEST(UsingIpAddresses) {

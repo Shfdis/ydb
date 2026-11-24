@@ -20,18 +20,20 @@ struct TListEndpointsResult {
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
-using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult()>;
+using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult(bool waitForChange)>;
 
 struct TEndpointUpdateResult {
     std::vector<std::string> Removed;
     TPlainStatus DiscoveryStatus;
+    bool AllowLongPolling;
+    bool Empty;
 };
 
 class TEndpointPool {
 public:
     TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client);
     ~TEndpointPool();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync();
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(bool waitForChange = false);
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);

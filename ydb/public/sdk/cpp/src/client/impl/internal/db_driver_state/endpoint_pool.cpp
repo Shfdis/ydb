@@ -26,7 +26,7 @@ TEndpointPool::~TEndpointPool() {
     }
 }
 
-std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync() {
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(bool waitForChange) {
     NThreading::TFuture<TEndpointUpdateResult> future;
     {
         std::lock_guard guard(Mutex_);
@@ -120,10 +120,11 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             std::lock_guard guard(Mutex_);
             DiscoveryPromise_.Swap(promise);
         }
-        promise.SetValue({std::move(removed), result.DiscoveryStatus});
+        promise.SetValue({std::move(removed), std::move(result.DiscoveryStatus),
+            result.Result.allow_long_polling(), result.Result.endpoints().empty()});
     };
 
-    Provider_().Subscribe(handler);
+    Provider_(waitForChange).Subscribe(handler);
     return {future, true};
 }
 

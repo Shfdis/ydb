@@ -118,7 +118,7 @@ public:
     void PostToResponseQueue(std::function<void()>&& f) override;
 
     void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline deadline);
-    void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline::Duration delay);
+    void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline::Duration delay) override;
 
     NThreading::TFuture<bool> ScheduleFuture(
         TDuration timeout,
@@ -790,7 +790,7 @@ public:
             }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy);
     }
 
-    TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState) override;
+    TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState, bool waitForChange) override;
     TListEndpointsResult MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState);
 
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
@@ -849,7 +849,7 @@ private:
                     TConnection{nullptr},
                     TEndpointKey{},
                     StopState_);
-            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync) {
+            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync || dbState->LongPolling) {
                 TStringStream errString;
                 errString << "Endpoint list is empty for database " << dbState->Database;
                 errString << ", cluster endpoint " << dbState->DiscoveryEndpoint;
@@ -893,7 +893,7 @@ private:
                 } while (!QueuedRequests_.compare_exchange_weak(val, newVal));
 
                 // UpdateAsync guarantees one update in progress for state.
-                auto asyncResult = dbState->EndpointPool.UpdateAsync();
+                auto asyncResult = dbState->UpdateEndpoints();
                 const bool needUpdateChannels = asyncResult.second;
                 auto stopState = StopState_;
                 asyncResult.first.Subscribe([this, callback = std::move(callback), needUpdateChannels, dbState, preferredEndpoint, endpointPolicy, stopState = std::move(stopState)]

@@ -11,8 +11,8 @@ import "ydb/public/api/protos/ydb_operation.proto";
 message ListEndpointsRequest {
     string database = 1;
     repeated string service = 2;
-
-// todo: feature flags
+    // Hold the call until the endpoints change or the server timeout expires.
+    bool wait_for_change = 3;
 }
 
 message EndpointInfo {
@@ -47,6 +47,9 @@ message ListEndpointsResult {
     // List of bridge pile states.
     // This field is empty if cluster is not in bridge mode.
     repeated Ydb.Bridge.PileState pile_states = 3;
+
+    // The next ListEndpoints request may set wait_for_change.
+    bool allow_long_polling = 4;
 }
 
 message ListEndpointsResponse {
