@@ -292,34 +292,21 @@ class AbstractTestDiscoveryFaultInjection(object):
 
 
 class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
-    def test_long_poll_on_slot_stop(self):
-        def ports(response):
-            if response.operation.status != StatusIds.SUCCESS:
-                return None
-            result = discovery.ListEndpointsResult()
-            assert response.operation.result.Unpack(result)
-            assert result.allow_long_polling
-            return {entry.port for entry in result.endpoints}
-
+    def inject_fault(self, slot):
         with grpc.insecure_channel(self.cluster.nodes[1].endpoint) as channel:
             list_endpoints = DiscoveryServiceStub(channel).ListEndpoints
-            request = discovery.ListEndpointsRequest(database=self.database_name)
-            initial = {slot.grpc_port for slot in self.cluster.slots.values()}
-            assert wait_for(lambda: ports(list_endpoints(request, timeout=10)) == initial, timeout_seconds=30)
-            slot = next(iter(self.cluster.slots.values()))
-            request.wait_for_change = True
-            # Only a board update can reply before the server's 30-second timeout.
-            update = list_endpoints.future(request, timeout=25)
+            request = discovery.ListEndpointsRequest(database=self.database_name, wait_for_change=True)
+            pending = [list_endpoints.future(request, timeout=25) for _ in range(2)]
             with pytest.raises(grpc.FutureTimeoutError):
-                update.result(timeout=1)
-            try:
-                slot.stop()
-                assert ports(update.result()) == initial - {slot.grpc_port}
-            finally:
-                slot.start()
-
-    def inject_fault(self, slot):
-        slot.stop()
+                pending[0].result(timeout=1)
+            slot.stop()
+            expected = {s.grpc_port for s in self.cluster.slots.values()} - {slot.grpc_port}
+            for call in pending:
+                response = call.result().operation
+                assert response.status == StatusIds.SUCCESS
+                result = discovery.ListEndpointsResult()
+                assert response.result.Unpack(result) and result.allow_long_polling
+                assert {ep.port for ep in result.endpoints} == expected
 
     def extract_fault(self, slot):
         slot.start()

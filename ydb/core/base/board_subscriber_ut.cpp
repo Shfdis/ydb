@@ -86,7 +86,6 @@ public:
     }
 
     void SimpleSubscriber();
-    void PrepublishedEndpoint();
     void ManySubscribersManyPublisher();
     void NotAvailableByShutdown();
     void ReconnectReplica();
@@ -99,7 +98,6 @@ protected:
 class TBoardSubscriberTest : public TBoardSubscriberTestBase {
     UNIT_TEST_SUITE(TBoardSubscriberTest);
     UNIT_TEST(SimpleSubscriber);
-    UNIT_TEST(PrepublishedEndpoint);
     UNIT_TEST(ManySubscribersManyPublisher);
     UNIT_TEST(NotAvailableByShutdown);
     UNIT_TEST(ReconnectReplica);
@@ -181,28 +179,6 @@ void TBoardSubscriberTestBase::SimpleSubscriber() {
         UNIT_ASSERT(updatesIt != updates.end());
         UNIT_ASSERT(updatesIt->second.Dropped);
     }
-}
-
-void TBoardSubscriberTestBase::PrepublishedEndpoint() {
-    const auto edge = Context->AllocateEdgeActor();
-    const auto replicas = ResolveReplicas();
-    const auto publisher = CreatePublisher("path", "endpoint", edge, 0);
-    TDispatchOptions published;
-    published.FinalEvents.emplace_back(TEvStateStorage::EvReplicaBoardPublishAck, replicas.size());
-    UNIT_ASSERT(Context->DispatchEvents(published, TDuration::Seconds(10)));
-
-    const auto subscriber = CreateSubscriber("path", edge, 0);
-    TDispatchOptions lookedUp;
-    lookedUp.FinalEvents.emplace_back([&](IEventHandle& event) {
-        return event.GetTypeRewrite() == TEvStateStorage::EvReplicaBoardInfo && event.Recipient == subscriber;
-    }, replicas.size());
-    UNIT_ASSERT(Context->DispatchEvents(lookedUp, TDuration::Seconds(10)));
-    auto snapshot = Context->GrabEdgeEvent<TEvStateStorage::TEvBoardInfo>(edge);
-    UNIT_ASSERT_VALUES_EQUAL(snapshot->Get()->InfoEntries.at(publisher).Payload, "endpoint");
-
-    KillPublisher(edge, publisher, 0);
-    auto update = Context->GrabEdgeEvent<TEvStateStorage::TEvBoardInfoUpdate>(edge);
-    UNIT_ASSERT(update->Get()->Updates.at(publisher).Dropped);
 }
 
 void TBoardSubscriberTestBase::ManySubscribersManyPublisher() {

@@ -7,7 +7,6 @@
 
 #include <library/cpp/string_utils/quote/quote.h>
 
-#include <algorithm>
 #include <thread>
 #include <unordered_map>
 
@@ -41,12 +40,7 @@ TDbDriverState::TDbDriverState(
     , DiscoveryMode(discoveryMode)
     , SslCredentials(sslCredentials)
     , Client(client)
-    , EndpointPool([this, client](bool waitForChange) {
-        // this callback will be called just after shared_ptr initialization
-        // so this call is safe
-        auto self = shared_from_this();
-        return client->GetEndpoints(self, waitForChange);
-    }, client)
+    , EndpointPool(*this)
     , StatCollector(
         database,
         client->GetMetricRegistry(),
@@ -133,74 +127,6 @@ void TDbDriverState::SignalDiscoveryCompleted() {
     DiscoveryCompletedPromise.TrySetValue();
 }
 
-std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::UpdateEndpoints() {
-    auto update = EndpointPool.UpdateAsync();
-    if (update.second) {
-        update.first.Subscribe([self = shared_from_this()](const auto& future) {
-            const auto& result = future.GetValue();
-            if (result.DiscoveryStatus.Ok() && result.AllowLongPolling && !self->LongPolling.exchange(true)) {
-                self->ScheduleLongPoll(!result.Empty, 0ms, 100ms);
-            }
-        });
-    }
-    return update;
-}
-
-std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::WaitForEndpoints(const TEndpointKey& preferred, bool onlyPreferred) {
-    {
-        std::unique_lock guard(LastDiscoveryStatusRWLock);
-        if (LongPolling) {
-            if (EndpointPool.GetEndpoint(preferred, onlyPreferred)) {
-                return {NThreading::MakeFuture(TEndpointUpdateResult{}), false};
-            }
-            if (!PendingEndpoints.Initialized()) {
-                PendingEndpoints = NThreading::NewPromise<TEndpointUpdateResult>();
-            }
-            return {PendingEndpoints.GetFuture(), false};
-        }
-    }
-    return UpdateEndpoints();
-}
-
-void TDbDriverState::CompleteLongPoll(const TEndpointUpdateResult& result, bool keepPolling) {
-    NThreading::TPromise<TEndpointUpdateResult> pending;
-    {
-        std::unique_lock guard(LastDiscoveryStatusRWLock);
-        LongPolling = keepPolling;
-        LastDiscoveryStatus = result.DiscoveryStatus;
-        if (!keepPolling || !result.DiscoveryStatus.Ok() || !result.Empty) {
-            PendingEndpoints.Swap(pending);
-        }
-    }
-    if (pending.Initialized()) {
-        pending.SetValue(result);
-    }
-}
-
-void TDbDriverState::ScheduleLongPoll(bool wait, std::chrono::milliseconds delay, std::chrono::milliseconds retryDelay) {
-    Client->ScheduleCallback(TDuration::MilliSeconds(delay.count()), [weak = weak_from_this(), wait, retryDelay](bool ok) {
-        if (auto self = weak.lock()) {
-            if (!ok) {
-                self->CompleteLongPoll({{}, TPlainStatus(EStatus::CLIENT_CANCELLED, "Client is stopped"), false, true}, false);
-                return;
-            }
-            const auto started = std::chrono::steady_clock::now();
-            self->EndpointPool.UpdateAsync(wait).first.Subscribe([self, retryDelay, started](const auto& future) {
-                const auto& result = future.GetValue();
-                const bool keepPolling = !result.DiscoveryStatus.Ok() || result.AllowLongPolling;
-                self->CompleteLongPoll(result, keepPolling);
-                if (keepPolling) {
-                    const bool waitForChange = result.DiscoveryStatus.Ok() && !result.Empty;
-                    const auto interval = waitForChange ? 100ms : retryDelay;
-                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
-                    const auto delay = result.DiscoveryStatus.Ok() ? std::max(0ms, interval - elapsed) : interval;
-                    self->ScheduleLongPoll(waitForChange, delay, waitForChange ? 100ms : std::min(2 * retryDelay, 5000ms));
-                }
-            });
-        }
-    });
-}
-
 TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
     auto weak = std::weak_ptr<TDbDriverState>(driverState);
     return [weak](NYdb::NIssue::TIssues&&, EStatus status) {
@@ -224,7 +150,7 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
             }
 
             if (pessThreshold || expiration) {
-                auto asyncResult = strong->UpdateEndpoints();
+                auto asyncResult = strong->EndpointPool.UpdateAsync();
                 // true - we were first who run UpdateAsync
                 if (asyncResult.second) {
                     auto cb = [strong](const NThreading::TFuture<TEndpointUpdateResult>& future) {
@@ -340,7 +266,7 @@ TDbDriverStatePtr TDbDriverStateTracker::GetDriverState(
     }
 
     if (strongState->DiscoveryMode != EDiscoveryMode::Off) {
-        auto updateResult = strongState->UpdateEndpoints();
+        auto updateResult = strongState->EndpointPool.UpdateAsync();
         if (updateResult.second) {
             auto cb = [strongState](const NThreading::TFuture<TEndpointUpdateResult>&) {
                 strongState->SignalDiscoveryCompleted();

@@ -382,69 +382,55 @@ not-base64
         }
     }
 
-    void CheckLongPollAfterEmptyList(EDiscoveryMode mode) {
-        TPortManager ports;
-        TMockTableService table;
-        const auto tablePort = ports.GetPort();
-        auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
+    Y_UNIT_TEST(LongPollAfterEmptyList) {
+        for (auto mode : {EDiscoveryMode::Sync, EDiscoveryMode::Async}) {
+            TPortManager ports;
+            TMockTableService table;
+            const auto tablePort = ports.GetPort();
+            auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
 
-        TManualEvent emptyApplied, resume, restored, unexpectedPoll;
-        std::mutex lock;
-        std::vector<bool> waits;
-        TMockDiscoveryService discovery;
-        auto* endpoint = discovery.MockResults["/Root"].add_endpoints();
-        endpoint->set_address("127.0.0.1");
-        endpoint->set_port(tablePort);
-        discovery.OnListEndpoints = [&](const auto& request, auto& snapshot) {
-            size_t call;
-            {
-                std::lock_guard guard(lock);
-                waits.push_back(request.wait_for_change());
-                call = waits.size();
-            }
-            snapshot.set_allow_long_polling(call < 4);
-            if (call == 2) {
-                snapshot.clear_endpoints();
-            } else if (call == 3) {
-                emptyApplied.Signal();
-                resume.WaitT(TDuration::Seconds(10));
-            } else if (call == 4) {
-                restored.Signal();
-            } else if (call > 4) {
-                unexpectedPoll.Signal();
-            }
-        };
-        const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
-        auto discoveryServer = StartGrpcServer(address, discovery);
-        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root").SetDiscoveryMode(mode).SetMaxQueuedRequests(1));
-        TTableClient client(driver);
+            TManualEvent emptyApplied, resume, restored, unexpectedPoll;
+            std::atomic_int calls = 0;
+            TMockDiscoveryService discovery;
+            auto* endpoint = discovery.MockResults["/Root"].add_endpoints();
+            endpoint->set_address("127.0.0.1");
+            endpoint->set_port(tablePort);
+            discovery.OnListEndpoints = [&](const auto& request, auto& snapshot) {
+                const int call = ++calls;
+                if (call > 5 || request.wait_for_change() != (call == 2 || call == 5)) {
+                    unexpectedPoll.Signal();
+                }
+                snapshot.set_allow_long_polling(call < 5);
+                if (call == 2 || call == 3) {
+                    snapshot.clear_endpoints();
+                }
+                if (call == 3) {
+                    emptyApplied.Signal();
+                    resume.WaitT(TDuration::Seconds(10));
+                } else if (call == 5) {
+                    restored.Signal();
+                }
+            };
+            const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
+            auto discoveryServer = StartGrpcServer(address, discovery);
+            TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root").SetDiscoveryMode(mode).SetMaxQueuedRequests(1));
+            TTableClient client(driver);
 
-        UNIT_ASSERT(emptyApplied.WaitT(TDuration::Seconds(10)));
-        auto session = client.CreateSession();
-        if (mode == EDiscoveryMode::Async) {
-            auto overflow = client.CreateSession();
-            UNIT_ASSERT(overflow.Wait(TDuration::Seconds(2)));
-            UNIT_ASSERT_VALUES_EQUAL(overflow.GetValue().GetStatus(), EStatus::CLIENT_LIMITS_REACHED);
-            UNIT_ASSERT(!session.HasValue());
-        } else {
-            UNIT_ASSERT(session.Wait(TDuration::Seconds(2)));
+            UNIT_ASSERT(emptyApplied.WaitT(TDuration::Seconds(10)));
+            auto session = client.CreateSession();
+            UNIT_ASSERT_VALUES_EQUAL(session.Wait(TDuration::Seconds(2)), mode == EDiscoveryMode::Sync);
+            if (mode == EDiscoveryMode::Async) {
+                auto overflow = client.CreateSession();
+                UNIT_ASSERT(overflow.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(overflow.GetValue().GetStatus(), EStatus::CLIENT_LIMITS_REACHED);
+            }
+            resume.Signal();
+            UNIT_ASSERT(session.Wait(TDuration::Seconds(10)));
+            UNIT_ASSERT_VALUES_EQUAL(session.GetValue().GetStatus(), mode == EDiscoveryMode::Async ? EStatus::SUCCESS : EStatus::UNAVAILABLE);
+            UNIT_ASSERT(restored.WaitT(TDuration::Seconds(10)));
+            UNIT_ASSERT(client.CreateSession().GetValueSync().IsSuccess());
+            UNIT_ASSERT(!unexpectedPoll.WaitT(TDuration::MilliSeconds(500)));
         }
-        resume.Signal();
-        UNIT_ASSERT(session.Wait(TDuration::Seconds(10)));
-        UNIT_ASSERT_VALUES_EQUAL(session.GetValue().GetStatus(), mode == EDiscoveryMode::Async ? EStatus::SUCCESS : EStatus::UNAVAILABLE);
-        UNIT_ASSERT(restored.WaitT(TDuration::Seconds(10)));
-        UNIT_ASSERT(client.CreateSession().GetValueSync().IsSuccess());
-        UNIT_ASSERT(!unexpectedPoll.WaitT(TDuration::MilliSeconds(500)));
-        std::lock_guard guard(lock);
-        UNIT_ASSERT(waits == std::vector<bool>({false, true, false, true}));
-    }
-
-    Y_UNIT_TEST(LongPollAfterDiscoveryAndRefreshAfterEmptyList) {
-        CheckLongPollAfterEmptyList(EDiscoveryMode::Sync);
-    }
-
-    Y_UNIT_TEST(AsyncDiscoveryWaitsForEndpointsAfterEmptyLongPoll) {
-        CheckLongPollAfterEmptyList(EDiscoveryMode::Async);
     }
 
     Y_UNIT_TEST(UsingIpAddresses) {

@@ -196,8 +196,7 @@ class TBoardLookupActor : public TActorBootstrapped<TBoardLookupActor> {
                     (Subscriber && AllStatsHasAndHasNoInfo())) {
                 auto reply = MakeHolder<TEvStateStorage::TEvBoardInfo>(
                     TEvStateStorage::TEvBoardInfo::EStatus::Ok, Path);
-                // Keep the quorum snapshot to deduplicate replies from the remaining replicas.
-                reply->InfoEntries = Subscriber ? Info : std::move(Info);
+                reply->InfoEntries = std::move(Info);
                 Send(Owner, std::move(reply), 0, Cookie);
                 if (Subscriber) {
                     Become(&TThis::StateSubscribe);

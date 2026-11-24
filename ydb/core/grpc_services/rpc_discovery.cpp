@@ -27,7 +27,6 @@ class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     THolder<TEvListEndpointsRequest> Request;
     const TActorId CacheId;
     TActorId Discoverer;
-    bool WaitingForChange = false;
 
     THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
     THolder<TEvInterconnect::TEvNodeInfo> NameserviceResponse;
@@ -46,9 +45,9 @@ public:
     {}
 
     void Bootstrap() {
-        WaitingForChange = Request->GetProtoRequest()->wait_for_change()
+        const bool waitForChange = Request->GetProtoRequest()->wait_for_change()
             && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-        if (WaitingForChange) {
+        if (waitForChange) {
             Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup);
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
                 system->Send(self, new TEvents::TEvPoisonPill);
@@ -57,7 +56,7 @@ public:
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId, WaitingForChange));
+            SelfId(), CacheId, waitForChange));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -94,24 +93,15 @@ public:
             Request->RaiseIssue(MakeIssue(NKikimrIssues::TIssuesIds::GENERIC_RESOLVE_ERROR, "Endpoint discovery timed out"));
             return Reply(Ydb::StatusIds::UNAVAILABLE);
         }
-        WaitingForChange = false;
+        LookupResponse->WaitingForChange = false;
         TryReplyAndDie();
     }
 
     void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
-        if (!Discoverer) {
-            return;
-        }
-        const bool first = !LookupResponse;
         LookupResponse.Reset(ev->Release().Release());
-        if (WaitingForChange) {
-            if (first && LookupResponse->HasEndpoints) {
-                return;
-            }
-            Send(Discoverer, new TEvents::TEvPoisonPill);
-            WaitingForChange = false;
+        if (!LookupResponse->WaitingForChange) {
+            Discoverer = {};
         }
-        Discoverer = {};
         TryReplyAndDie();
     }
 
@@ -121,9 +111,6 @@ public:
     }
 
     void Handle(TEvDiscovery::TEvError::TPtr &ev) {
-        if (!Discoverer) {
-            return;
-        }
         Discoverer = {};
 
         auto issue = MakeIssue(ErrorToIssueCode(ev->Get()->Status), ev->Get()->Error);
@@ -163,7 +150,7 @@ public:
     }
 
     void TryReplyAndDie() {
-        if (WaitingForChange || !NameserviceResponse || !LookupResponse)
+        if (!NameserviceResponse || !LookupResponse || LookupResponse->WaitingForChange)
             return;
 
         Y_ABORT_UNLESS(LookupResponse->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);

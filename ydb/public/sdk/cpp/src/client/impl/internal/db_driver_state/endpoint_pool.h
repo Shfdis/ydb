@@ -20,18 +20,15 @@ struct TListEndpointsResult {
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
-using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult(bool waitForChange)>;
 
 struct TEndpointUpdateResult {
     std::vector<std::string> Removed;
     TPlainStatus DiscoveryStatus;
-    bool AllowLongPolling;
-    bool Empty;
 };
 
 class TEndpointPool {
 public:
-    TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client);
+    explicit TEndpointPool(TDbDriverState& state);
     ~TEndpointPool();
     std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(bool waitForChange = false);
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
@@ -55,7 +52,8 @@ private:
     EPileState GetPileState(const Ydb::Bridge::PileState::State& state) const;
 
 private:
-    TListEndpointsResultProvider Provider_;
+    TDbDriverState& State_;
+    std::atomic<bool> PollScheduled_{false};
     std::mutex Mutex_;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;

@@ -42,8 +42,8 @@ struct TEvDiscovery {
 
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
-        TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
-        bool HasEndpoints = false;
+        TEvStateStorage::TEvBoardInfo::EStatus Status;
+        bool WaitingForChange = false;
     };
 };
 
@@ -83,7 +83,7 @@ public:
         UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
     }
 
-    void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
+    bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
 
     void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
                         const TBridgeInfo::TPtr& bridgeInfo,
@@ -105,7 +105,7 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId, bool subscribe = false);
+    const TActorId& cacheId, bool waitForChange = false);
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

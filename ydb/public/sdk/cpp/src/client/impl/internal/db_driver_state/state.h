@@ -8,8 +8,6 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/common_client/ssl_credentials.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/core_facility/core_facility.h>
 
-#include <atomic>
-#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -43,8 +41,6 @@ public:
     NThreading::TFuture<void> DiscoveryCompleted() const;
 
     void SignalDiscoveryCompleted();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateEndpoints();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> WaitForEndpoints(const TEndpointKey& preferred, bool onlyPreferred);
     void InitCredentials(std::shared_ptr<ICredentialsProviderFactory> credentialsProviderFactory);
     NThreading::TFuture<void> GetCredentialsReady() const;
     std::shared_ptr<ICredentialsProvider> GetCredentialsProvider() const;
@@ -82,10 +78,6 @@ public:
     NThreading::TPromise<void> DiscoveryCompletedPromise;
 
 private:
-    void ScheduleLongPoll(bool wait, std::chrono::milliseconds delay, std::chrono::milliseconds retryDelay);
-    void CompleteLongPoll(const TEndpointUpdateResult& result, bool keepPolling);
-    NThreading::TPromise<TEndpointUpdateResult> PendingEndpoints;
-
     struct TCredentials {
         std::shared_ptr<ICredentialsProvider> Provider;
 #ifndef YDB_GRPC_UNSECURE_AUTH

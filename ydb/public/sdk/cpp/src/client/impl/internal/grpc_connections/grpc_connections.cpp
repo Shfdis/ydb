@@ -750,7 +750,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
     std::weak_ptr<TDbDriverState> weakState = dbState;
 
     auto stopState = StopState_;
-    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState)](NThreading::TFuture<TListEndpointsResult> future){
+    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState), waitForChange](NThreading::TFuture<TListEndpointsResult> future){
         auto strong = weakState.lock();
         auto result = future.ExtractValue();
         TSdkCallbackGuard guard(stopState);
@@ -760,7 +760,18 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         if (strong && result.DiscoveryStatus.IsTransportError()) {
             strong->StatCollector.IncDiscoveryFailDueTransportError();
         }
-        return NThreading::MakeFuture<TListEndpointsResult>(MutateDiscovery(std::move(result), strong.get()));
+        result = MutateDiscovery(std::move(result), strong.get());
+        // Async callers share this refresh and retry on a successful empty list.
+        if (!waitForChange && strong && strong->LongPolling && result.DiscoveryStatus.Ok()
+                && result.Result.allow_long_polling() && result.Result.endpoints().empty()) {
+            return ScheduleFuture(TDuration::Seconds(1)).Apply([result = std::move(result)](const auto& timer) mutable {
+                if (!timer.GetValue()) {
+                    result.DiscoveryStatus = MakeClientStoppedStatus();
+                }
+                return std::move(result);
+            });
+        }
+        return NThreading::MakeFuture<TListEndpointsResult>(std::move(result));
     });
 }
 
