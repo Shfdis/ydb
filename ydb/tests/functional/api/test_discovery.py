@@ -4,8 +4,13 @@ import six
 import time
 import logging
 
+import grpc
+import pytest
 from hamcrest import assert_that, is_, not_
 
+from ydb.public.api.grpc.ydb_discovery_v1_pb2_grpc import DiscoveryServiceStub
+from ydb.public.api.protos import ydb_discovery_pb2 as discovery
+from ydb.public.api.protos.ydb_status_codes_pb2 import StatusIds
 from ydb.tests.library.harness.kikimr_runner import KiKiMR
 from ydb.tests.library.harness.kikimr_config import KikimrConfigGenerator
 from ydb.tests.library.common import types
@@ -287,6 +292,32 @@ class AbstractTestDiscoveryFaultInjection(object):
 
 
 class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
+    def test_long_poll_on_slot_stop(self):
+        def ports(response):
+            if response.operation.status != StatusIds.SUCCESS:
+                return None
+            result = discovery.ListEndpointsResult()
+            assert response.operation.result.Unpack(result)
+            assert result.allow_long_polling
+            return {entry.port for entry in result.endpoints}
+
+        with grpc.insecure_channel(self.cluster.nodes[1].endpoint) as channel:
+            list_endpoints = DiscoveryServiceStub(channel).ListEndpoints
+            request = discovery.ListEndpointsRequest(database=self.database_name)
+            initial = {slot.grpc_port for slot in self.cluster.slots.values()}
+            assert wait_for(lambda: ports(list_endpoints(request, timeout=10)) == initial, timeout_seconds=30)
+            slot = next(iter(self.cluster.slots.values()))
+            request.wait_for_change = True
+            # Only a board update can reply before the server's 30-second timeout.
+            update = list_endpoints.future(request, timeout=25)
+            with pytest.raises(grpc.FutureTimeoutError):
+                update.result(timeout=1)
+            try:
+                slot.stop()
+                assert ports(update.result()) == initial - {slot.grpc_port}
+            finally:
+                slot.start()
+
     def inject_fault(self, slot):
         slot.stop()
 

@@ -44,6 +44,7 @@ public:
 
     void SignalDiscoveryCompleted();
     std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateEndpoints();
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> WaitForEndpoints(const TEndpointKey& preferred, bool onlyPreferred);
     void InitCredentials(std::shared_ptr<ICredentialsProviderFactory> credentialsProviderFactory);
     NThreading::TFuture<void> GetCredentialsReady() const;
     std::shared_ptr<ICredentialsProvider> GetCredentialsProvider() const;
@@ -81,7 +82,9 @@ public:
     NThreading::TPromise<void> DiscoveryCompletedPromise;
 
 private:
-    void ScheduleLongPoll(const TEndpointUpdateResult& result, std::chrono::milliseconds retryDelay);
+    void ScheduleLongPoll(bool wait, std::chrono::milliseconds delay, std::chrono::milliseconds retryDelay);
+    void CompleteLongPoll(const TEndpointUpdateResult& result, bool keepPolling);
+    NThreading::TPromise<TEndpointUpdateResult> PendingEndpoints;
 
     struct TCredentials {
         std::shared_ptr<ICredentialsProvider> Provider;

@@ -1,5 +1,6 @@
 #include <ydb/core/discovery/discovery.h>
 
+#include <ydb/core/base/statestorage_impl.h>
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <ydb/public/api/grpc/ydb_discovery_v1.grpc.pb.h>
 
@@ -33,24 +34,70 @@ void ValidateDiscovererResponse(TTestActorRuntime& runtime, TActorId edge) {
 
 Y_UNIT_TEST_SUITE(Discovery) {
     Y_UNIT_TEST(WatchEndpointBoard) {
-        TKikimrRunner kikimr(TKikimrSettings{});
+        TKikimrRunner kikimr(TKikimrSettings{}.SetUseRealThreads(false));
         auto& runtime = *kikimr.GetTestServer().GetRuntime();
-        const auto edge = runtime.AllocateEdgeActor();
         const TString path = MakeEndpointsBoardPath("/Root/test-watch");
-        const auto watch = runtime.Register(CreateDiscoverer([path](const TString&) { return path; },
-            "/Root", false, edge, {}, true));
-        auto expectEndpoints = [&](size_t count) {
+        const auto cache = runtime.Register(CreateDiscoveryCache());
+        const auto first = runtime.AllocateEdgeActor();
+        const auto second = runtime.AllocateEdgeActor();
+        TVector<TActorId> lookups;
+        auto observer = runtime.AddObserver<TEvStateStorage::TEvResolveBoard>([&](auto& ev) {
+            if (ev->Get()->Subscribe && ev->Get()->Path == path) {
+                lookups.push_back(ev->Sender);
+            }
+        });
+        auto watch = [&](TActorId edge, bool serialize) {
+            return runtime.Register(CreateDiscoverer([path](const TString&) { return path; },
+                "/Root", serialize, edge, cache, true));
+        };
+        auto expectEndpoints = [&](TActorId edge, size_t count) {
             auto event = runtime.GrabEdgeEvent<TEvDiscovery::TEvDiscoveryData>(edge, TDuration::Seconds(10));
             UNIT_ASSERT(event);
             UNIT_ASSERT_EQUAL(event->Get()->Status, TEvStateStorage::TEvBoardInfo::EStatus::Ok);
-            UNIT_ASSERT_VALUES_EQUAL(event->Get()->InfoEntries.size(), count);
+            UNIT_ASSERT_VALUES_EQUAL(event->Get()->HasEndpoints, count != 0);
+            if (edge == first) {
+                UNIT_ASSERT_VALUES_EQUAL(event->Get()->InfoEntries.size(), count);
+            } else {
+                UNIT_ASSERT(event->Get()->InfoEntries.empty());
+                UNIT_ASSERT_VALUES_EQUAL(UnpackDiscoveryData(event->Get()->CachedMessage).endpoints_size(), count);
+            }
         };
-        expectEndpoints(0);
-        const auto publisher = runtime.Register(CreateBoardPublishActor(path, "endpoint", edge, 0, true));
-        expectEndpoints(1);
-        runtime.Send(publisher, edge, new TEvents::TEvPoisonPill);
-        expectEndpoints(0);
-        runtime.Send(watch, edge, new TEvents::TEvPoisonPill);
+        const auto watch1 = watch(first, false);
+        const auto watch2 = watch(second, true);
+        expectEndpoints(first, 0);
+        expectEndpoints(second, 0);
+        UNIT_ASSERT_VALUES_EQUAL(lookups.size(), 1);
+        observer.Remove();
+
+        NKikimrStateStorage::TEndpointBoardEntry entry;
+        entry.SetAddress("localhost");
+        entry.SetPort(2135);
+        auto publish = [&] {
+            return runtime.Register(CreateBoardPublishActor(path, entry.SerializeAsString(), first, 0, true));
+        };
+        auto publisher = publish();
+        expectEndpoints(first, 1);
+        expectEndpoints(second, 1);
+        auto blockCacheTick = runtime.AddObserver<TEvents::TEvWakeup>([&](auto& ev) {
+            if (ev->Recipient == cache) {
+                ev.Reset();
+            }
+        });
+        runtime.Send(publisher, first, new TEvents::TEvPoisonPill);
+        expectEndpoints(first, 0);
+        expectEndpoints(second, 0);
+        runtime.Send(watch1, first, new TEvents::TEvPoisonPill);
+        publisher = publish();
+        expectEndpoints(second, 1);
+
+        runtime.Send(watch2, second, new TEvents::TEvPoisonPill);
+        TDispatchOptions stopped;
+        stopped.FinalEvents.emplace_back([&](IEventHandle& ev) {
+            return ev.GetTypeRewrite() == TEvents::TEvPoison::EventType && ev.Recipient == lookups.front() && ev.Sender == cache;
+        });
+        UNIT_ASSERT(runtime.DispatchEvents(stopped, TDuration::Seconds(10)));
+        runtime.Send(publisher, first, new TEvents::TEvPoisonPill);
+        runtime.Send(cache, first, new TEvents::TEvPoisonPill);
     }
 
     Y_UNIT_TEST(DelayedNameserviceResponse) {

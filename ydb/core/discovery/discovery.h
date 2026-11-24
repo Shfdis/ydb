@@ -42,7 +42,8 @@ struct TEvDiscovery {
 
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
-        TEvStateStorage::TEvBoardInfo::EStatus Status;
+        TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
+        bool HasEndpoints = false;
     };
 };
 
@@ -55,11 +56,9 @@ public:
 
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
-    TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
+    TEvStateStorage::TEvBoardInfo::EStatus Status;
 
 public:
-    TCachedMessageData() = default;
-
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
                         const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& infoEntries,
                         const TBridgeInfo::TPtr& bridgeInfo = nullptr,

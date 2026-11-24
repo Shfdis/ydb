@@ -1,16 +1,18 @@
 #include "grpc_request_proxy.h"
 
 #include "rpc_calls.h"
-#include "rpc_kqp_base.h"
 
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/base/location.h>
 #include <ydb/core/discovery/discovery.h>
+#include <ydb/core/util/wilson.h>
+#include <ydb/library/wilson_ids/wilson.h>
 
 #include <yql/essentials/public/issue/yql_issue_message.h>
 #include <yql/essentials/public/issue/yql_issue.h>
 
 #include <ydb/library/actors/core/interconnect.h>
+#include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/interconnect/interconnect.h>
 #include <ydb/library/actors/core/hfunc.h>
 
@@ -20,14 +22,12 @@ namespace NKikimr::NGRpcService {
 
 using namespace NActors;
 using namespace Ydb;
-using namespace NKqp;
 
 class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     THolder<TEvListEndpointsRequest> Request;
     const TActorId CacheId;
     TActorId Discoverer;
-    bool Subscribed = false;
-    bool Waiting = false;
+    bool WaitingForChange = false;
 
     THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
     THolder<TEvInterconnect::TEvNodeInfo> NameserviceResponse;
@@ -46,9 +46,9 @@ public:
     {}
 
     void Bootstrap() {
-        Subscribed = Request->GetProtoRequest()->wait_for_change() && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-        if (Subscribed) {
-            Waiting = true;
+        WaitingForChange = Request->GetProtoRequest()->wait_for_change()
+            && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
+        if (WaitingForChange) {
             Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup);
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
                 system->Send(self, new TEvents::TEvPoisonPill);
@@ -57,7 +57,7 @@ public:
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId, Subscribed));
+            SelfId(), CacheId, WaitingForChange));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -79,23 +79,39 @@ public:
             hFunc(TEvDiscovery::TEvDiscoveryData, Handle);
             hFunc(TEvInterconnect::TEvNodeInfo, Handle);
             hFunc(TEvDiscovery::TEvError, Handle);
-            sFunc(TEvents::TEvPoison, PassAway);
+            sFunc(TEvents::TEvPoison, Cancel);
             sFunc(TEvents::TEvWakeup, Wakeup);
         }
     }
 
+    void Cancel() {
+        Request->ReplyWithRpcStatus(grpc::StatusCode::CANCELLED, {}, {});
+        PassAway();
+    }
+
     void Wakeup() {
-        Waiting = false;
+        if (!LookupResponse || !NameserviceResponse) {
+            Request->RaiseIssue(MakeIssue(NKikimrIssues::TIssuesIds::GENERIC_RESOLVE_ERROR, "Endpoint discovery timed out"));
+            return Reply(Ydb::StatusIds::UNAVAILABLE);
+        }
+        WaitingForChange = false;
         TryReplyAndDie();
     }
 
     void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
-        if (!Subscribed) {
-            Discoverer = {};
-        } else if (LookupResponse) {
-            Waiting = false;
+        if (!Discoverer) {
+            return;
         }
+        const bool first = !LookupResponse;
         LookupResponse.Reset(ev->Release().Release());
+        if (WaitingForChange) {
+            if (first && LookupResponse->HasEndpoints) {
+                return;
+            }
+            Send(Discoverer, new TEvents::TEvPoisonPill);
+            WaitingForChange = false;
+        }
+        Discoverer = {};
         TryReplyAndDie();
     }
 
@@ -105,6 +121,9 @@ public:
     }
 
     void Handle(TEvDiscovery::TEvError::TPtr &ev) {
+        if (!Discoverer) {
+            return;
+        }
         Discoverer = {};
 
         auto issue = MakeIssue(ErrorToIssueCode(ev->Get()->Status), ev->Get()->Error);
@@ -144,7 +163,7 @@ public:
     }
 
     void TryReplyAndDie() {
-        if (Waiting || !NameserviceResponse || !LookupResponse)
+        if (WaitingForChange || !NameserviceResponse || !LookupResponse)
             return;
 
         Y_ABORT_UNLESS(LookupResponse->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);
@@ -161,7 +180,7 @@ public:
             cachedMessageSsl = LookupResponse->CachedMessageSsl;
         } else {
             NDiscovery::TCachedMessageData cachedMessageData(
-                LookupResponse->InfoEntries,
+                std::move(LookupResponse->InfoEntries),
                 NameserviceResponse, LookupResponse->BridgeInfo,
                 endpointId, services);
 

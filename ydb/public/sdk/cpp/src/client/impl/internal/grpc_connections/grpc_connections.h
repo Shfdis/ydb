@@ -118,7 +118,7 @@ public:
     void PostToResponseQueue(std::function<void()>&& f) override;
 
     void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline deadline);
-    void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline::Duration delay) override;
+    void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline::Duration delay);
 
     NThreading::TFuture<bool> ScheduleFuture(
         TDuration timeout,
@@ -128,7 +128,7 @@ public:
         TDuration timeout,
         std::function<void(bool)> callback,
         IQueueClientContextPtr token = nullptr
-    );
+    ) override;
     // The idea is: sometimes we need to work with multiple databases simultaneously
     // This method returns DbDriverState (or just db state) for given database credentials pair
     // this state is used to keep data related to particular database.
@@ -849,7 +849,7 @@ private:
                     TConnection{nullptr},
                     TEndpointKey{},
                     StopState_);
-            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync || dbState->LongPolling) {
+            } else if (dbState->DiscoveryMode == EDiscoveryMode::Sync) {
                 TStringStream errString;
                 errString << "Endpoint list is empty for database " << dbState->Database;
                 errString << ", cluster endpoint " << dbState->DiscoveryEndpoint;
@@ -893,7 +893,8 @@ private:
                 } while (!QueuedRequests_.compare_exchange_weak(val, newVal));
 
                 // UpdateAsync guarantees one update in progress for state.
-                auto asyncResult = dbState->UpdateEndpoints();
+                auto asyncResult = dbState->WaitForEndpoints(preferredEndpoint,
+                    endpointPolicy == TRpcRequestSettings::TEndpointPolicy::UsePreferredEndpointStrictly);
                 const bool needUpdateChannels = asyncResult.second;
                 auto stopState = StopState_;
                 asyncResult.first.Subscribe([this, callback = std::move(callback), needUpdateChannels, dbState, preferredEndpoint, endpointPolicy, stopState = std::move(stopState)]

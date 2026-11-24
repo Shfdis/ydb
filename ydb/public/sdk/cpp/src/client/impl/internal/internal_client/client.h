@@ -28,7 +28,7 @@ struct TListEndpointsResult;
 class IInternalClient {
 public:
     virtual NThreading::TFuture<TListEndpointsResult> GetEndpoints(std::shared_ptr<TDbDriverState> dbState, bool waitForChange) = 0;
-    virtual void ScheduleDelayedTask(TSimpleCb&& fn, TDeadline::Duration delay) = 0;
+    virtual void ScheduleCallback(TDuration delay, std::function<void(bool)> callback, NYdbGrpc::IQueueClientContextPtr token = nullptr) = 0;
     virtual void AddPeriodicTask(TPeriodicCb&& cb, TDeadline::Duration period) = 0;
     virtual void PostToResponseQueue(std::function<void()>&& f) = 0;
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL

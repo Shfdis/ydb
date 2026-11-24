@@ -382,7 +382,7 @@ not-base64
         }
     }
 
-    Y_UNIT_TEST(LongPollAfterDiscoveryAndRefreshAfterEmptyList) {
+    void CheckLongPollAfterEmptyList(EDiscoveryMode mode) {
         TPortManager ports;
         TMockTableService table;
         const auto tablePort = ports.GetPort();
@@ -416,18 +416,35 @@ not-base64
         };
         const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
         auto discoveryServer = StartGrpcServer(address, discovery);
-        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root"));
+        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root").SetDiscoveryMode(mode).SetMaxQueuedRequests(1));
         TTableClient client(driver);
 
         UNIT_ASSERT(emptyApplied.WaitT(TDuration::Seconds(10)));
-        auto session = client.CreateSession().GetValueSync();
+        auto session = client.CreateSession();
+        if (mode == EDiscoveryMode::Async) {
+            auto overflow = client.CreateSession();
+            UNIT_ASSERT(overflow.Wait(TDuration::Seconds(2)));
+            UNIT_ASSERT_VALUES_EQUAL(overflow.GetValue().GetStatus(), EStatus::CLIENT_LIMITS_REACHED);
+            UNIT_ASSERT(!session.HasValue());
+        } else {
+            UNIT_ASSERT(session.Wait(TDuration::Seconds(2)));
+        }
         resume.Signal();
-        UNIT_ASSERT_VALUES_EQUAL(session.GetStatus(), EStatus::UNAVAILABLE);
+        UNIT_ASSERT(session.Wait(TDuration::Seconds(10)));
+        UNIT_ASSERT_VALUES_EQUAL(session.GetValue().GetStatus(), mode == EDiscoveryMode::Async ? EStatus::SUCCESS : EStatus::UNAVAILABLE);
         UNIT_ASSERT(restored.WaitT(TDuration::Seconds(10)));
         UNIT_ASSERT(client.CreateSession().GetValueSync().IsSuccess());
         UNIT_ASSERT(!unexpectedPoll.WaitT(TDuration::MilliSeconds(500)));
         std::lock_guard guard(lock);
         UNIT_ASSERT(waits == std::vector<bool>({false, true, false, true}));
+    }
+
+    Y_UNIT_TEST(LongPollAfterDiscoveryAndRefreshAfterEmptyList) {
+        CheckLongPollAfterEmptyList(EDiscoveryMode::Sync);
+    }
+
+    Y_UNIT_TEST(AsyncDiscoveryWaitsForEndpointsAfterEmptyLongPoll) {
+        CheckLongPollAfterEmptyList(EDiscoveryMode::Async);
     }
 
     Y_UNIT_TEST(UsingIpAddresses) {

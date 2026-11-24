@@ -139,41 +139,66 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::Upda
         update.first.Subscribe([self = shared_from_this()](const auto& future) {
             const auto& result = future.GetValue();
             if (result.DiscoveryStatus.Ok() && result.AllowLongPolling && !self->LongPolling.exchange(true)) {
-                self->ScheduleLongPoll(result, 100ms);
+                self->ScheduleLongPoll(!result.Empty, 0ms, 100ms);
             }
         });
     }
     return update;
 }
 
-void TDbDriverState::ScheduleLongPoll(const TEndpointUpdateResult& result, std::chrono::milliseconds retryDelay) {
-    if (result.DiscoveryStatus.Ok() && !result.AllowLongPolling) {
-        LongPolling = false;
-        return;
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TDbDriverState::WaitForEndpoints(const TEndpointKey& preferred, bool onlyPreferred) {
+    {
+        std::unique_lock guard(LastDiscoveryStatusRWLock);
+        if (LongPolling) {
+            if (EndpointPool.GetEndpoint(preferred, onlyPreferred)) {
+                return {NThreading::MakeFuture(TEndpointUpdateResult{}), false};
+            }
+            if (!PendingEndpoints.Initialized()) {
+                PendingEndpoints = NThreading::NewPromise<TEndpointUpdateResult>();
+            }
+            return {PendingEndpoints.GetFuture(), false};
+        }
     }
-    const bool wait = result.DiscoveryStatus.Ok() && !result.Empty;
-    const auto delay = wait ? 100ms : retryDelay;
-    const auto nextRetry = wait ? 100ms : std::min(2 * retryDelay, 5000ms);
-    Client->ScheduleDelayedTask([weak = weak_from_this(), wait, nextRetry] {
+    return UpdateEndpoints();
+}
+
+void TDbDriverState::CompleteLongPoll(const TEndpointUpdateResult& result, bool keepPolling) {
+    NThreading::TPromise<TEndpointUpdateResult> pending;
+    {
+        std::unique_lock guard(LastDiscoveryStatusRWLock);
+        LongPolling = keepPolling;
+        LastDiscoveryStatus = result.DiscoveryStatus;
+        if (!keepPolling || !result.DiscoveryStatus.Ok() || !result.Empty) {
+            PendingEndpoints.Swap(pending);
+        }
+    }
+    if (pending.Initialized()) {
+        pending.SetValue(result);
+    }
+}
+
+void TDbDriverState::ScheduleLongPoll(bool wait, std::chrono::milliseconds delay, std::chrono::milliseconds retryDelay) {
+    Client->ScheduleCallback(TDuration::MilliSeconds(delay.count()), [weak = weak_from_this(), wait, retryDelay](bool ok) {
         if (auto self = weak.lock()) {
-            auto [future, first] = self->EndpointPool.UpdateAsync(wait);
-            future.Subscribe([self, first, nextRetry](const auto& future) {
+            if (!ok) {
+                self->CompleteLongPoll({{}, TPlainStatus(EStatus::CLIENT_CANCELLED, "Client is stopped"), false, true}, false);
+                return;
+            }
+            const auto started = std::chrono::steady_clock::now();
+            self->EndpointPool.UpdateAsync(wait).first.Subscribe([self, retryDelay, started](const auto& future) {
                 const auto& result = future.GetValue();
-#ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
-                if (first) {
-                    self->Client->DeleteChannels(result.Removed);
+                const bool keepPolling = !result.DiscoveryStatus.Ok() || result.AllowLongPolling;
+                self->CompleteLongPoll(result, keepPolling);
+                if (keepPolling) {
+                    const bool waitForChange = result.DiscoveryStatus.Ok() && !result.Empty;
+                    const auto interval = waitForChange ? 100ms : retryDelay;
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+                    const auto delay = result.DiscoveryStatus.Ok() ? std::max(0ms, interval - elapsed) : interval;
+                    self->ScheduleLongPoll(waitForChange, delay, waitForChange ? 100ms : std::min(2 * retryDelay, 5000ms));
                 }
-#else
-                Y_UNUSED(first);
-#endif
-                {
-                    std::unique_lock guard(self->LastDiscoveryStatusRWLock);
-                    self->LastDiscoveryStatus = result.DiscoveryStatus;
-                }
-                self->ScheduleLongPoll(result, nextRetry);
             });
         }
-    }, delay);
+    });
 }
 
 TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
