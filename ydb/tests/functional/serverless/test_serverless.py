@@ -11,6 +11,7 @@ import datetime
 import random
 import string
 
+import grpc
 from ydb.retries import (
     RetrySettings,
 )
@@ -19,6 +20,8 @@ from hamcrest import assert_that, contains_inanyorder, not_none, not_, only_cont
 from tornado import gen
 from tornado.ioloop import IOLoop
 
+from ydb.public.api.grpc.ydb_discovery_v1_pb2_grpc import DiscoveryServiceStub
+from ydb.public.api.protos.ydb_discovery_pb2 import ListEndpointsRequest, ListEndpointsResult
 from ydb.tests.oss.ydb_sdk_import import ydb
 from ydb.tests.library.common.types import Erasure
 from ydb.tests.library.harness.util import LogLevels
@@ -676,15 +679,30 @@ def test_discovery_exclusive_nodes(ydb_hostel_db, ydb_serverless_db_with_exclusi
     assert_that(serverless_db_shared_endpoints, not_none())
     assert_that(serverless_db_shared_endpoints, contains_inanyorder(*hostel_db_endpoints))
 
-    alter_database_serverless_compute_resources_mode(
-        ydb_cluster,
-        ydb_serverless_db_with_exclusive_nodes,
-        "EServerlessComputeResourcesModeExclusive"
-    )
-    serverless_db_exclusive_endpoints = list_endpoints(ydb_endpoint, ydb_serverless_db_with_exclusive_nodes)
+    def addresses(endpoints):
+        return {(endpoint.address, endpoint.port) for endpoint in endpoints}
 
-    assert_that(serverless_db_exclusive_endpoints, not_none())
-    assert_that(serverless_db_exclusive_endpoints, only_contains(not_(is_in(serverless_db_shared_endpoints))))
+    with grpc.insecure_channel(ydb_endpoint) as channel:
+        stub = DiscoveryServiceStub(channel)
+        request = ListEndpointsRequest(database=ydb_serverless_db_with_exclusive_nodes)
+        current = ListEndpointsResult()
+        assert stub.ListEndpoints(request, timeout=30).operation.result.Unpack(current)
+        snapshots = None
+        if ListEndpointsResult.STREAM_LIST_ENDPOINTS in current.features:
+            stream = stub.StreamListEndpoints(request, timeout=120)
+            snapshots = (addresses(snapshot.endpoints) for snapshot in stream)
+            assert addresses(hostel_db_endpoints) in snapshots
+
+        alter_database_serverless_compute_resources_mode(
+            ydb_cluster,
+            ydb_serverless_db_with_exclusive_nodes,
+            "EServerlessComputeResourcesModeExclusive"
+        )
+        serverless_db_exclusive_endpoints = list_endpoints(ydb_endpoint, ydb_serverless_db_with_exclusive_nodes)
+        assert_that(serverless_db_exclusive_endpoints, not_none())
+        assert_that(serverless_db_exclusive_endpoints, only_contains(not_(is_in(serverless_db_shared_endpoints))))
+        if snapshots is not None:
+            assert addresses(serverless_db_exclusive_endpoints) in snapshots
 
 
 def test_create_table_using_exclusive_nodes(ydb_serverless_db_with_exclusive_nodes, ydb_endpoint, ydb_cluster):

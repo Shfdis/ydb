@@ -391,6 +391,9 @@ not-base64
 
                 grpc::Status StreamListEndpoints(grpc::ServerContext* context, const Ydb::Discovery::ListEndpointsRequest* request,
                         grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
+                    if (context->deadline() != std::chrono::system_clock::time_point::max()) {
+                        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unexpected discovery stream deadline");
+                    }
                     if (request->database() != "/Root") {
                         return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
                     }
@@ -414,7 +417,8 @@ not-base64
                     return grpc::Status::OK;
                 }
             } discovery;
-            discovery.MockResults["/Root"].set_use_stream_list_endpoints(true);
+            discovery.MockResults["/Root"].add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+            discovery.MockResults["/Root"].add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
             auto* endpoint = discovery.Standby.add_endpoints();
             endpoint->set_address("standby.invalid");
             endpoint->add_ip_v4("127.0.0.1");

@@ -36,6 +36,7 @@ public:
     void BanEndpoint(const std::string& endpoint);
     void BanNodeId(std::uint64_t nodeId);
     int GetPessimizationRatio();
+    void RestoreDiscoveryPriorities();
     bool LinkObjToEndpoint(const TEndpointKey& endpoint, TEndpointObj* obj, const void* tag);
     void ForEachEndpoint(const TEndpointElectorSafe::THandleCb& cb, const void* tag) const;
     void ForEachLocalEndpoint(const TEndpointElectorSafe::THandleCb& cb, const void* tag) const;

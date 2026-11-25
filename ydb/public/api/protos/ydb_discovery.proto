@@ -11,8 +11,6 @@ import "ydb/public/api/protos/ydb_operation.proto";
 message ListEndpointsRequest {
     string database = 1;
     repeated string service = 2;
-
-// todo: feature flags
 }
 
 message EndpointInfo {
@@ -48,8 +46,13 @@ message ListEndpointsResult {
     // This field is empty if cluster is not in bridge mode.
     repeated Ydb.Bridge.PileState pile_states = 3;
 
-    // Subscribe to StreamListEndpoints for subsequent snapshots.
-    bool use_stream_list_endpoints = 4;
+    enum Feature {
+        FEATURE_UNSPECIFIED = 0;
+        LONG_POLLING = 1;
+        STREAM_LIST_ENDPOINTS = 2;
+    }
+    // Discovery modes supported by this server.
+    repeated Feature features = 4;
 }
 
 message ListEndpointsResponse {

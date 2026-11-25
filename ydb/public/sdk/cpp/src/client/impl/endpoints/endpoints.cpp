@@ -112,7 +112,7 @@ std::vector<std::string> TEndpointElectorSafe::SetNewState(std::vector<TEndpoint
         // Find endpoints which were added
         Records_ = std::move(uniqRec);
         for (const auto& record : Records_) {
-            KnownEndpoints_[record.Endpoint] = record;
+            KnownEndpoints_[record.Endpoint] = {record, record.Priority};
             KnownEndpointsByNodeId_[record.NodeId].Record = record;
         }
         Y_ABORT_UNLESS(Records_.size() == KnownEndpoints_.size());
@@ -143,7 +143,7 @@ TEndpointRecord TEndpointElectorSafe::GetEndpoint(const TEndpointKey& preferredE
     if (!preferredEndpoint.GetEndpoint().empty()) {
         auto it = KnownEndpoints_.find(preferredEndpoint.GetEndpoint());
         if (it != KnownEndpoints_.end()) {
-            return it->second;
+            return it->second.Record;
         }
     }
 
@@ -159,6 +159,16 @@ TEndpointRecord TEndpointElectorSafe::GetEndpoint(const TEndpointKey& preferredE
         return Records_[idx];
     }
 }
+
+void TEndpointElectorSafe::SetPriorityUnlocked(TEndpointRecord& record, std::int32_t priority) {
+    record.Priority = priority;
+    KnownEndpoints_.at(record.Endpoint).Record.Priority = priority;
+    auto& node = KnownEndpointsByNodeId_.at(record.NodeId).Record;
+    if (node.Endpoint == record.Endpoint) {
+        node.Priority = priority;
+    }
+}
+
 bool TEndpointElectorSafe::PessimizeEndpointUnlocked(const std::string& endpoint) {
     const auto recordIt = std::ranges::find_if(Records_, [&](const TEndpointRecord& r) {
         return r.Endpoint == endpoint && r.Priority != PessimizedPriority;
@@ -167,19 +177,7 @@ bool TEndpointElectorSafe::PessimizeEndpointUnlocked(const std::string& endpoint
         return false;
     }
 
-    const auto nodeId = recordIt->NodeId;
-    recordIt->Priority = PessimizedPriority;
-
-    if (auto it = KnownEndpoints_.find(endpoint); it != KnownEndpoints_.end()) {
-        it->second.Priority = PessimizedPriority;
-    }
-
-    if (auto it = KnownEndpointsByNodeId_.find(nodeId); it != KnownEndpointsByNodeId_.end()
-        && it->second.Record.Endpoint == endpoint)
-    {
-        it->second.Record.Priority = PessimizedPriority;
-    }
-
+    SetPriorityUnlocked(*recordIt, PessimizedPriority);
     const int pessimizationRatio = PessimizationRatio_.load();
     const auto newRatio = (pessimizationRatio * Records_.size() + 100) / Records_.size();
     PessimizationRatio_.store(newRatio);
@@ -221,6 +219,21 @@ void TEndpointElectorSafe::PessimizeNode(const std::uint64_t nodeId) {
         Sort(Records_.begin(), Records_.end());
         BestK_ = GetBestK(Records_);
     }
+}
+
+void TEndpointElectorSafe::RestoreDiscoveryPriorities() {
+    std::unique_lock guard(Mutex_);
+    if (Records_.empty() || Records_.back().Priority != PessimizedPriority) {
+        return;
+    }
+    for (auto it = Records_.rbegin(); it != Records_.rend() && it->Priority == PessimizedPriority; ++it) {
+        SetPriorityUnlocked(*it, KnownEndpoints_.at(it->Endpoint).DiscoveryPriority);
+    }
+    Sort(Records_.begin(), Records_.end());
+    BestK_ = GetBestK(Records_);
+    PessimizationRatio_.store(0);
+    PessimizationRatioGauge_.SetValue(0);
+    EndpointActiveGauge_.SetValue(Records_.size());
 }
 
 // % of endpoints which was pessimized

@@ -6,6 +6,8 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/exceptions/exceptions.h>
 #include <ydb/public/sdk/cpp/src/client/impl/observability/constants.h>
 
+#include <util/generic/is_in.h>
+
 #include <string>
 #include <thread>
 #include <utility>
@@ -766,7 +768,8 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         }
         result = MutateDiscovery(std::move(result), strong.get());
         if (strong) {
-            strong->Streaming = result.DiscoveryStatus.Ok() && result.Result.use_stream_list_endpoints();
+            strong->Streaming = result.DiscoveryStatus.Ok() &&
+                IsIn(result.Result.features(), Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
         }
         return NThreading::MakeFuture(std::move(result));
     });
@@ -781,13 +784,10 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::ReadEndpointSnapshot(TDbDriverSt
     if (!state->DiscoveryReader) {
         TRequest request;
         request.set_database(TStringType{state->Database});
-        TRpcRequestSettings settings;
-        // The server renews the stream after one minute. Also bound stalled opens and reads.
-        settings.Deadline = TDeadline::AfterDuration(std::chrono::seconds(70));
         auto opened = NThreading::NewPromise<TReader>();
         StartReadStream<TService, TRequest, TResult>(request,
             [opened](TPlainStatus, TReader reader) mutable { opened.SetValue(std::move(reader)); },
-            &TService::Stub::AsyncStreamListEndpoints, state, settings);
+            &TService::Stub::AsyncStreamListEndpoints, state, {});
         state->DiscoveryReader = co_await opened.GetFuture();
     }
 

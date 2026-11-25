@@ -142,14 +142,16 @@ Y_UNIT_TEST_SUITE(EndpointElector) {
         elector.PessimizeEndpoint("One");
         UNIT_ASSERT_VALUES_EQUAL(elector.GetPessimizationRatio(), 50);
         elector.SetNewState(std::vector<TEndpointRecord>{{"Two", 2}});
+        elector.RestoreDiscoveryPriorities();
+        UNIT_ASSERT(!elector.GetEndpoint(TEndpointKey("One", 0), true));
         UNIT_ASSERT_VALUES_EQUAL(elector.GetPessimizationRatio(), 0);
     }
 
     Y_UNIT_TEST(PessimizeNode) {
         TEndpointElectorSafe elector;
         elector.SetNewState(std::vector<TEndpointRecord>{
-            {"host:2136", 1, "", 42},
-            {"ipv4:10.0.0.1:2136", 1, "", 42},
+            {"host:2136", 0, "", 42},
+            {"ipv4:10.0.0.1:2136", 0, "", 42},
             {"other:2136", 1, "", 99},
         });
         UNIT_ASSERT_VALUES_EQUAL(elector.GetPessimizationRatio(), 0);
@@ -166,6 +168,12 @@ Y_UNIT_TEST_SUITE(EndpointElector) {
 
         elector.PessimizeNode(42);
         UNIT_ASSERT_VALUES_EQUAL(elector.GetPessimizationRatio(), 66);
+        UNIT_ASSERT_VALUES_EQUAL(elector.GetEndpoint({}).NodeId, 99);
+        elector.RestoreDiscoveryPriorities();
+        UNIT_ASSERT_VALUES_EQUAL(elector.GetEndpoint({}).NodeId, 42);
+        UNIT_ASSERT_VALUES_EQUAL(elector.GetEndpoint(TEndpointKey("ipv4:10.0.0.1:2136", 0), true).Priority, 0);
+        UNIT_ASSERT_VALUES_EQUAL(elector.GetEndpoint(TEndpointKey(42), true).Priority, 0);
+        UNIT_ASSERT_VALUES_EQUAL(elector.GetPessimizationRatio(), 0);
     }
 
     Y_UNIT_TEST(Election) {

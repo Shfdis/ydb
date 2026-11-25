@@ -140,6 +140,11 @@ int TEndpointPool::GetPessimizationRatio() {
     return Elector_.GetPessimizationRatio();
 }
 
+void TEndpointPool::RestoreDiscoveryPriorities() {
+    Elector_.RestoreDiscoveryPriorities();
+    LastUpdateTime_ = TInstant::Now().MicroSeconds();
+}
+
 bool TEndpointPool::LinkObjToEndpoint(const TEndpointKey& endpoint, TEndpointObj* obj, const void* tag) {
     return Elector_.LinkObjToEndpoint(endpoint, obj, tag);
 }

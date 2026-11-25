@@ -143,11 +143,16 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
         TDbDriverState::TPtr strong = weak.lock();
         if (!strong) {
             return false;
-        } else if (!strong->Streaming) {
-
+        } else {
             bool pessThreshold = strong->EndpointPool.GetPessimizationRatio() > PESSIMIZATION_DISCOVERY_THRESHOLD;
             bool expiration = strong->EndpointPool.TimeSinceLastUpdate() > ENDPOINT_UPDATE_PERIOD;
 
+            if (strong->Streaming) {
+                if (pessThreshold || expiration) {
+                    strong->EndpointPool.RestoreDiscoveryPriorities();
+                }
+                return true;
+            }
             if (pessThreshold) {
                 strong->StatCollector.IncDiscoveryDuePessimization();
             }

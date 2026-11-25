@@ -25,7 +25,7 @@ class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     const TActorId CacheId;
     TActorId Discoverer;
 
-    bool SentSnapshot = false;
+    bool InitialSnapshotSent = false;
 
     NWilson::TSpan Span;
 
@@ -47,7 +47,7 @@ public:
                 Request->ReplyWithRpcStatus(grpc::StatusCode::UNIMPLEMENTED, "Endpoint subscriptions disabled", {});
                 return PassAway();
             }
-            // Re-resolve the database periodically, including its serverless resources domain.
+            // Bound the wait for the first snapshot only.
             Schedule(TDuration::Minutes(1), new TEvents::TEvWakeup(1));
             auto* system = TActivationContext::ActorSystem();
             Request->SetFinishAction([system, self = SelfId()] { system->Send(self, new TEvents::TEvPoisonPill); });
@@ -80,12 +80,11 @@ public:
 
     void Handle(TEvents::TEvWakeup::TPtr& ev) {
         if (ev->Get()->Tag) {
-            if (SentSnapshot) {
-                Request->FinishStream(Ydb::StatusIds::SUCCESS);
-            } else {
+            if (!InitialSnapshotSent) {
                 Request->ReplyWithRpcStatus(grpc::StatusCode::UNAVAILABLE, "Endpoint discovery timed out", {});
+                PassAway();
             }
-            return PassAway();
+            return;
         }
         --PendingWrites;
     }
@@ -111,9 +110,9 @@ public:
                 data->BridgeInfo, Request->GetEndpointId(), {services.begin(), services.end()});
             message = filtered.GetMessage(ssl, Streaming);
         }
-        SentSnapshot = true;
         Request->SendSerializedResult(std::move(message), Ydb::StatusIds::SUCCESS);
         if (Streaming) {
+            InitialSnapshotSent = true;
             ++PendingWrites;
         } else {
             PassAway();

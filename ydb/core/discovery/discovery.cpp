@@ -221,9 +221,10 @@ namespace NDiscovery {
             }
         }
 
-        const bool subscriptions = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-        cachedMessage.set_use_stream_list_endpoints(subscriptions);
-        cachedMessageSsl.set_use_stream_list_endpoints(subscriptions);
+        if (AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+            cachedMessage.add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
+            cachedMessageSsl.add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
+        }
         StreamMessage.clear();
         StreamMessageSsl.clear();
         CachedMessage = SerializeResult(cachedMessage);
@@ -614,6 +615,7 @@ class TDiscoverer: public TActorBootstrapped<TDiscoverer> {
     const TActorId CacheId;
     const bool Subscribe;
     TMaybe<TString> WatchPath;
+    TPathId StreamDomain;
 
     THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
     THolder<TEvTxProxySchemeCache::TEvNavigateKeySetResult> SchemeCacheResponse;
@@ -624,6 +626,13 @@ class TDiscoverer: public TActorBootstrapped<TDiscoverer> {
     void Reply(IEventBase* ev) {
         Send(ReplyTo, ev);
         PassAway();
+    }
+
+    void UnsubscribeFromBoard() {
+        if (WatchPath) {
+            Send(CacheId, new NDiscoveryPrivate::TEvPrivate::TEvUnsubscribe(*WatchPath));
+            WatchPath.Clear();
+        }
     }
 
 public:
@@ -645,8 +654,9 @@ public:
     }
 
     void PassAway() override {
-        if (WatchPath) {
-            Send(CacheId, new NDiscoveryPrivate::TEvPrivate::TEvUnsubscribe(*WatchPath));
+        UnsubscribeFromBoard();
+        if (StreamDomain) {
+            Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchRemove);
         }
         TActorBootstrapped<TDiscoverer>::PassAway();
     }
@@ -664,6 +674,8 @@ public:
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvDiscovery::TEvDiscoveryData, Handle);
             hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
+            hFunc(TEvTxProxySchemeCache::TEvWatchNotifyUpdated, Handle);
+            sFunc(TEvTxProxySchemeCache::TEvWatchNotifyDeleted, DatabaseDeleted);
             sFunc(TEvents::TEvPoison, PassAway);
         }
     }
@@ -686,6 +698,9 @@ public:
     }
 
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev) {
+        if (Subscribe && ev->Cookie != LookupCookie) {
+            return;
+        }
         SchemeCacheResponse.Reset(ev->Release().Release());
 
         const auto* response = SchemeCacheResponse.Get()->Request.Get();
@@ -729,13 +744,22 @@ public:
                 "Requested path is not database name"));
         }
 
-        auto info = entry.DomainInfo;
-        if (NeedResolveResources(info)) {
+        const auto& info = *entry.DomainInfo;
+        const auto target = EndpointDomain(info.DomainKey, info.ResourcesDomainKey,
+            info.ServerlessComputeResourcesMode.GetOrElse(NKikimrSubDomains::EServerlessComputeResourcesModeUnspecified));
+        if (Subscribe && !StreamDomain && info.IsServerless()) {
+            StreamDomain = target;
+            Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchPathId(info.DomainKey));
+            if (target != info.DomainKey) {
+                return Navigate(target);
+            }
+        }
+        if (!Subscribe && target != info.DomainKey) {
             YDB_LOG_DEBUG_COMP(NKikimrServices::DISCOVERY, "Resolve resources domain",
-                {"domainKey", info->DomainKey},
-                {"resourcesDomainKey", info->ResourcesDomainKey});
+                {"domainKey", info.DomainKey},
+                {"resourcesDomainKey", target});
 
-            Navigate(info->ResourcesDomainKey);
+            Navigate(target);
             ResolveResources = true;
         } else if (ResolveResources || Subscribe) {
             Lookup(CanonizePath(entry.Path));
@@ -744,23 +768,29 @@ public:
         MaybeReply();
     }
 
-    static bool NeedResolveResources(TIntrusivePtr<NSchemeCache::TDomainInfo> domainInfo) {
-        if (!domainInfo->IsServerless()) {
-            return false;
-        }
+    static TPathId EndpointDomain(TPathId database, TPathId resources, NKikimrSubDomains::EServerlessComputeResourcesMode mode) {
+        return mode == NKikimrSubDomains::EServerlessComputeResourcesModeExclusive ? database : resources;
+    }
 
-        if (domainInfo->ServerlessComputeResourcesMode.Empty()) {
-            return true;
+    void Handle(TEvTxProxySchemeCache::TEvWatchNotifyUpdated::TPtr& ev) {
+        const auto& msg = *ev->Get();
+        const auto& description = msg.Result->GetPathDescription();
+        if (!description.HasDomainDescription()) {
+            return;
         }
+        const auto& domain = description.GetDomainDescription();
+        const auto resources = domain.HasResourcesDomainKey() ? TPathId::FromDomainKey(domain.GetResourcesDomainKey()) : msg.PathId;
+        const auto target = EndpointDomain(msg.PathId, resources, domain.GetServerlessComputeResourcesMode());
+        if (target != StreamDomain) {
+            StreamDomain = target;
+            UnsubscribeFromBoard();
+            ++LookupCookie; // Discard late replies from the previous domain.
+            Navigate(target);
+        }
+    }
 
-        switch (*domainInfo->ServerlessComputeResourcesMode) {
-            case NKikimrSubDomains::EServerlessComputeResourcesModeExclusive:
-                return false;
-            case NKikimrSubDomains::EServerlessComputeResourcesModeShared:
-                return true;
-            default:
-                return true;
-        }
+    void DatabaseDeleted() {
+        Reply(new TEvDiscovery::TEvError(TEvDiscovery::TEvError::DATABASE_NOT_EXIST, "Requested database does not exist"));
     }
 
     void MaybeReply() {
@@ -835,7 +865,7 @@ public:
         entry.RedirectRequired = false;
         FillNavigateKey(id, entry);
 
-        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(request.Release()));
+        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(request.Release()), 0, LookupCookie);
         SchemeCacheResponse.Reset();
     }
 };
