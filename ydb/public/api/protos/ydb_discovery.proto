@@ -50,7 +50,7 @@ message ListEndpointsResult {
 
     // Echo this opaque hash in a request to wait for a snapshot change.
     // An operator reset returns an empty snapshot and hash.
-    bytes snapshot_hash = 5;
+    bytes snapshot_hash = 4;
 }
 
 message ListEndpointsResponse {
