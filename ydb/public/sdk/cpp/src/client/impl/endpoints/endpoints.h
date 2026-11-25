@@ -102,6 +102,7 @@ public:
 
     // Move all endpoints of a certain node to the end
     void PessimizeNode(const std::uint64_t nodeId);
+    void RestoreDiscoveryPriorities();
 
     // Returns % of pessimized endpoints
     int GetPessimizationRatio() const;
@@ -118,6 +119,7 @@ public:
 private:
     // Move endpoint to the end
     bool PessimizeEndpointUnlocked(const std::string& endpoint);
+    void SetPriorityUnlocked(TEndpointRecord& record, std::int32_t priority);
 
     using TTaggedObjRegistry = std::unordered_map<const void*, std::shared_ptr<TObjRegistry>>;
 
@@ -126,10 +128,15 @@ private:
         TTaggedObjRegistry TaggedObjs;
     };
 
+    struct TKnownAddress {
+        TEndpointRecord Record;
+        std::int32_t DiscoveryPriority;
+    };
+
 private:
     mutable std::shared_mutex Mutex_;
     std::vector<TEndpointRecord> Records_;
-    std::unordered_map<std::string, TEndpointRecord> KnownEndpoints_;
+    std::unordered_map<std::string, TKnownAddress> KnownEndpoints_;
     std::unordered_map<ui64, TKnownEndpoint> KnownEndpointsByNodeId_;
     std::int32_t BestK_ = -1;
     std::atomic_int PessimizationRatio_ = 0;

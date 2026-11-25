@@ -1,44 +1,31 @@
 #define INCLUDE_YDB_INTERNAL_H
 #include "endpoint_pool.h"
+#include "state.h"
 
 namespace NYdb::inline Dev {
 
-TEndpointPool::TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client)
-    : Provider_(provider)
+TEndpointPool::TEndpointPool(TDbDriverState& state)
+    : State_(state)
     , LastUpdateTime_(TInstant::Zero().MicroSeconds())
-    , BalancingPolicy_(client->GetBalancingSettings())
+    , BalancingPolicy_(state.Client->GetBalancingSettings())
 {}
 
-TEndpointPool::~TEndpointPool() {
-    try {
-        NThreading::TFuture<TEndpointUpdateResult> future;
-        {
-            std::lock_guard guard(Mutex_);
-            if (DiscoveryPromise_.Initialized()) {
-               future = DiscoveryPromise_.GetFuture();
-            }
-        }
-        if (future.Initialized()) {
-            future.Wait();
-        }
-    } catch (...) {
-        Y_ABORT("Unexpected exception from endpoint pool dtor");
-    }
-}
-
 std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync() {
-    NThreading::TFuture<TEndpointUpdateResult> future;
+    NThreading::TPromise<TEndpointUpdateResult> promise;
     {
         std::lock_guard guard(Mutex_);
         if (DiscoveryPromise_.Initialized()) {
             return {DiscoveryPromise_.GetFuture(), false};
-        } else {
-            DiscoveryPromise_ = NThreading::NewPromise<TEndpointUpdateResult>();
-            future = DiscoveryPromise_.GetFuture();
         }
+        promise = DiscoveryPromise_ = NThreading::NewPromise<TEndpointUpdateResult>();
     }
-    auto handler = [this](const TAsyncListEndpointsResult& future) {
+    auto handler = [this, weak = State_.weak_from_this(), promise](const TAsyncListEndpointsResult& future) mutable {
+        auto state = weak.lock();
         TListEndpointsResult result = future.GetValue();
+        if (!state) {
+            promise.SetValue({{}, std::move(result.DiscoveryStatus)});
+            return;
+        }
         std::vector<std::string> removed;
         if (result.DiscoveryStatus.Status == EStatus::SUCCESS) {
             std::vector<TEndpointRecord> records;
@@ -115,16 +102,21 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             LastUpdateTime_ = TInstant::Now().MicroSeconds();
             removed = Elector_.SetNewState(std::move(records));
         }
-        NThreading::TPromise<TEndpointUpdateResult> promise;
         {
             std::lock_guard guard(Mutex_);
-            DiscoveryPromise_.Swap(promise);
+            DiscoveryPromise_ = {};
         }
-        promise.SetValue({std::move(removed), result.DiscoveryStatus});
+        if (result.FromStream) {
+            removed.clear();
+        }
+        promise.SetValue({std::move(removed), std::move(result.DiscoveryStatus)});
+        if (state->Streaming) {
+            UpdateAsync();
+        }
     };
 
-    Provider_().Subscribe(handler);
-    return {future, true};
+    State_.Client->GetEndpoints(State_.shared_from_this()).Subscribe(std::move(handler));
+    return {promise.GetFuture(), true};
 }
 
 TEndpointRecord TEndpointPool::GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred) const {
@@ -146,6 +138,11 @@ void TEndpointPool::BanNodeId(std::uint64_t nodeId) {
 
 int TEndpointPool::GetPessimizationRatio() {
     return Elector_.GetPessimizationRatio();
+}
+
+void TEndpointPool::RestoreDiscoveryPriorities() {
+    Elector_.RestoreDiscoveryPriorities();
+    LastUpdateTime_ = TInstant::Now().MicroSeconds();
 }
 
 bool TEndpointPool::LinkObjToEndpoint(const TEndpointKey& endpoint, TEndpointObj* obj, const void* tag) {

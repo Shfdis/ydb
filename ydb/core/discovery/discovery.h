@@ -39,6 +39,7 @@ struct TEvDiscovery {
     struct TEvDiscoveryData : public TEventLocal<TEvDiscoveryData, EvDiscoveryData> {
         TString CachedMessage;
         TString CachedMessageSsl;
+        TString SelfLocation;
 
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
@@ -70,7 +71,7 @@ public:
     {}
 
     TCachedMessageData(TMap<TActorId, TEvStateStorage::TBoardInfoEntry> infoEntries,
-                        const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
+                        const TString& selfLocation,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
                         const TSet<TString>& services = {},
@@ -79,17 +80,22 @@ public:
         , BridgeInfo(bridgeInfo)
         , Status(status)
     {
-        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
+        UpdateCache(selfLocation, bridgeInfo, endpointId, services);
     }
 
-    void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
+    bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
 
-    void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
+    void UpdateCache(const TString& selfLocation,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
                         const TSet<TString>& services = {});
 
-    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage) const;
+    const TString& GetMessage(bool ssl, bool stream) const;
+    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool stream = false) const;
+
+private:
+    TString SelfLocation;
+    mutable TString StreamMessage, StreamMessageSsl;
 };
 
 }
@@ -104,7 +110,7 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId);
+    const TActorId& cacheId, bool subscribe = false);
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

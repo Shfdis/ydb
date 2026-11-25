@@ -74,6 +74,10 @@ private:
             return;
         }
 
+        if (auto* stream = dynamic_cast<TEvStreamListEndpointsRequest*>(requestBaseCtx)) {
+            stream->ReplyWithRpcStatus(grpc::StatusCode::UNIMPLEMENTED, "Static endpoint list", {});
+            return;
+        }
         THolder<TEvListEndpointsRequest> request(event->Release().Release());
         auto *result = TEvListEndpointsRequest::AllocateResult<Ydb::Discovery::ListEndpointsResult>(request);
         const auto& grpcConfig = AppConfig.GetGRpcConfig();

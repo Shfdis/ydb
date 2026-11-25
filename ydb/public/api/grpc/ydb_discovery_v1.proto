@@ -7,6 +7,7 @@ import "ydb/public/api/protos/ydb_discovery.proto";
 
 service DiscoveryService {
     rpc ListEndpoints(Ydb.Discovery.ListEndpointsRequest) returns (Ydb.Discovery.ListEndpointsResponse);
+    rpc StreamListEndpoints(Ydb.Discovery.ListEndpointsRequest) returns (stream Ydb.Discovery.ListEndpointsResult);
     rpc WhoAmI(Ydb.Discovery.WhoAmIRequest) returns (Ydb.Discovery.WhoAmIResponse);
     rpc NodeRegistration(Ydb.Discovery.NodeRegistrationRequest) returns (Ydb.Discovery.NodeRegistrationResponse);
 }

@@ -454,7 +454,7 @@ public:
                         };
 
                     requestWrapper.DoRequest(serviceConnection, std::move(responseCbLow), rpc, meta, context.get());
-            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy);
+            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy, requestSettings.Deadline);
     }
 
     template<typename TService, typename TRequest, typename TResponse>
@@ -657,7 +657,9 @@ public:
                                     dbState->EndpointPool.BanEndpoint(endpoint.GetEndpoint());
                                 }
                             };
-                            processor->AddFinishedCallback(std::move(finishedCallback));
+                            if constexpr (!std::is_same_v<TService, Ydb::Discovery::V1::DiscoveryService>) {
+                                processor->AddFinishedCallback(std::move(finishedCallback));
+                            }
                             TPlainStatus status(std::move(grpcStatus), endpoint.GetEndpoint(), {});
                             RunGuarded(stopState,
                                 [&] { responseCb(std::move(status), std::move(processor)); },
@@ -681,7 +683,7 @@ public:
                     std::move(rpc),
                     std::move(meta),
                     context.get());
-            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy);
+            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy, requestSettings.Deadline);
     }
 
     template<class TService, class TRequest, class TResponse, class TCallback>
@@ -787,10 +789,11 @@ public:
                         std::move(rpc),
                         std::move(meta),
                         context.get());
-            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy);
+            }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy, requestSettings.Deadline);
     }
 
     TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState) override;
+    TAsyncListEndpointsResult ReadEndpointSnapshot(TDbDriverStatePtr state);
     TListEndpointsResult MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState);
 
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
@@ -828,10 +831,13 @@ private:
         return TPlainStatus(EStatus::TRANSPORT_UNAVAILABLE, msg);
     }
 
+    NThreading::TFuture<TEndpointUpdateResult> WaitForStreamUpdate(
+        NThreading::TFuture<TEndpointUpdateResult> update, TDeadline deadline);
+
     template <typename TService, typename TCallback>
     YDB_ASAN_SIZE_ATTRIBUTES
     void WithServiceConnection(TCallback callback, TDbDriverStatePtr dbState,
-        const TEndpointKey& preferredEndpoint, TRpcRequestSettings::TEndpointPolicy endpointPolicy)
+        const TEndpointKey& preferredEndpoint, TRpcRequestSettings::TEndpointPolicy endpointPolicy, TDeadline deadline)
     {
         using TConnection = std::unique_ptr<TServiceConnection<TService>>;
         TConnection serviceConnection;
@@ -894,9 +900,18 @@ private:
 
                 // UpdateAsync guarantees one update in progress for state.
                 auto asyncResult = dbState->EndpointPool.UpdateAsync();
+                // A snapshot may have arrived between endpoint selection and joining the pending read.
+                if (dbState->Streaming && dbState->EndpointPool.GetEndpoint(preferredEndpoint,
+                        endpointPolicy == TRpcRequestSettings::TEndpointPolicy::UsePreferredEndpointStrictly)) {
+                    --QueuedRequests_;
+                    return WithServiceConnection<TService>(std::move(callback), dbState, preferredEndpoint, endpointPolicy, deadline);
+                }
+                if (dbState->Streaming && deadline != TDeadline::Max() && !asyncResult.first.IsReady()) {
+                    asyncResult.first = WaitForStreamUpdate(std::move(asyncResult.first), deadline);
+                }
                 const bool needUpdateChannels = asyncResult.second;
                 auto stopState = StopState_;
-                asyncResult.first.Subscribe([this, callback = std::move(callback), needUpdateChannels, dbState, preferredEndpoint, endpointPolicy, stopState = std::move(stopState)]
+                asyncResult.first.Subscribe([this, callback = std::move(callback), needUpdateChannels, dbState, preferredEndpoint, endpointPolicy, deadline, stopState = std::move(stopState)]
                     (const NThreading::TFuture<TEndpointUpdateResult>& future) mutable {
                     --QueuedRequests_;
                     RunGuarded(stopState,
@@ -909,7 +924,7 @@ private:
                             }
                             auto discoveryStatus = updateResult.DiscoveryStatus;
                             if (discoveryStatus.Status == EStatus::SUCCESS) {
-                                WithServiceConnection<TService>(std::move(callback), dbState, preferredEndpoint, endpointPolicy);
+                                WithServiceConnection<TService>(std::move(callback), dbState, preferredEndpoint, endpointPolicy, deadline);
                             } else {
                                 callback(
                                     TPlainStatus(discoveryStatus.Status, std::move(discoveryStatus.Issues)),

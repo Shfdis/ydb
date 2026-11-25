@@ -47,6 +47,21 @@ void FillYdbStatus(Ydb::Coordination::SessionResponse& resp, const NYql::TIssues
 
 using TEvListEndpointsRequest = TGRpcRequestWrapper<TRpcServices::EvListEndpoints, Ydb::Discovery::ListEndpointsRequest, Ydb::Discovery::ListEndpointsResponse, true>;
 
+struct TEvStreamListEndpointsRequest final : TEvListEndpointsRequest {
+    using TEvListEndpointsRequest::TEvListEndpointsRequest;
+
+    void ReplyWithYdbStatus(Ydb::StatusIds::StatusCode status) override {
+        grpc::StatusCode code = grpc::StatusCode::UNAVAILABLE;
+        switch (status) {
+            case Ydb::StatusIds::BAD_REQUEST: code = grpc::StatusCode::INVALID_ARGUMENT; break;
+            case Ydb::StatusIds::NOT_FOUND: code = grpc::StatusCode::NOT_FOUND; break;
+            case Ydb::StatusIds::UNAUTHORIZED: code = grpc::StatusCode::PERMISSION_DENIED; break;
+            default: break;
+        }
+        ReplyWithRpcStatus(code, Ydb::StatusIds::StatusCode_Name(status), {});
+    }
+};
+
 using TEvBiStreamPingRequest = TGRpcRequestBiStreamWrapper<TRpcServices::EvBiStreamPing, Draft::Dummy::PingRequest, Draft::Dummy::PingResponse>;
 using TEvStreamPQWriteRequest = TGRpcRequestBiStreamWrapper<TRpcServices::EvStreamPQWrite, Ydb::PersQueue::V1::StreamingWriteClientMessage, Ydb::PersQueue::V1::StreamingWriteServerMessage>;
 using TEvStreamPQMigrationReadRequest = TGRpcRequestBiStreamWrapper<TRpcServices::EvStreamPQMigrationRead, Ydb::PersQueue::V1::MigrationStreamingReadClientMessage, Ydb::PersQueue::V1::MigrationStreamingReadServerMessage>;

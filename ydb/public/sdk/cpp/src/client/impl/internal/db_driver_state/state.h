@@ -8,6 +8,7 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/common_client/ssl_credentials.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/core_facility/core_facility.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 
@@ -38,6 +39,7 @@ public:
         IInternalClient* client
     );
 
+    ~TDbDriverState();
     NThreading::TFuture<void> DiscoveryCompleted() const;
 
     void SignalDiscoveryCompleted();
@@ -66,6 +68,8 @@ public:
     const TSslCredentials SslCredentials;
     IInternalClient* Client;
     TEndpointPool EndpointPool;
+    std::atomic<bool> Streaming{false};
+    NYdbGrpc::IStreamRequestReadProcessor<Ydb::Discovery::ListEndpointsResult>::TPtr DiscoveryReader;
     // StopCb allow client to subscribe for notifications from lower layer
     std::mutex NotifyCbsLock;
     std::array<std::vector<TCb>, static_cast<size_t>(ENotifyType::COUNT)> NotifyCbs;

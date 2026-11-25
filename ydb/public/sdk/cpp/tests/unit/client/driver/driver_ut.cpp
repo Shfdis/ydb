@@ -14,10 +14,12 @@
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
+#include <grpcpp/support/sync_stream.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/testing/unittest/tests_data.h>
 #include <util/generic/mapfindptr.h>
+#include <util/system/event.h>
 
 #include <atomic>
 #include <functional>
@@ -373,6 +375,82 @@ not-base64
         };
         for (auto& t : ValidTokens) {
             UNIT_ASSERT_EQUAL(checkToken(t), EStatus::TRANSPORT_UNAVAILABLE);
+        }
+    }
+
+    Y_UNIT_TEST(StreamListEndpointsUpdatesTheDriver) {
+        for (auto mode : {EDiscoveryMode::Sync, EDiscoveryMode::Async}) {
+            TPortManager ports;
+            TMockTableService table;
+            const auto tablePort = ports.GetPort();
+            auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
+            struct TDiscovery : TMockDiscoveryService {
+                Ydb::Discovery::ListEndpointsResult Standby;
+                TManualEvent Empty, Publish, Reopened, Cancelled;
+                std::atomic_uint Subscriptions = 0;
+
+                grpc::Status StreamListEndpoints(grpc::ServerContext* context, const Ydb::Discovery::ListEndpointsRequest* request,
+                        grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
+                    if (context->deadline() != std::chrono::system_clock::time_point::max()) {
+                        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unexpected discovery stream deadline");
+                    }
+                    if (request->database() != "/Root") {
+                        return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
+                    }
+                    if (++Subscriptions == 1) {
+                        writer->Write({});
+                        Empty.Signal();
+                        if (Publish.WaitT(TDuration::Seconds(10))) {
+                            writer->Write(Standby);
+                        }
+                    } else {
+                        writer->Write(Standby);
+                        Reopened.Signal();
+                        const auto deadline = TInstant::Now() + TDuration::Seconds(10);
+                        while (!context->IsCancelled() && TInstant::Now() < deadline) {
+                            Sleep(TDuration::MilliSeconds(10));
+                        }
+                        if (context->IsCancelled()) {
+                            Cancelled.Signal();
+                        }
+                    }
+                    return grpc::Status::OK;
+                }
+            } discovery;
+            discovery.MockResults["/Root"].add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
+            auto* endpoint = discovery.Standby.add_endpoints();
+            endpoint->set_address("standby.invalid");
+            endpoint->add_ip_v4("127.0.0.1");
+            endpoint->set_port(tablePort);
+            const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
+            auto server = StartGrpcServer(address, discovery);
+            TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root").SetDiscoveryMode(mode).SetMaxQueuedRequests(1));
+            TTableClient client(driver);
+
+            UNIT_ASSERT(discovery.Empty.WaitT(TDuration::Seconds(10)));
+            if (mode == EDiscoveryMode::Async) {
+                auto expired = client.CreateSession(TCreateSessionSettings().ClientTimeout(TDuration::MilliSeconds(100)));
+                UNIT_ASSERT(expired.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(expired.GetValue().GetStatus(), EStatus::CLIENT_DEADLINE_EXCEEDED);
+            }
+            auto session = client.CreateSession();
+            if (mode == EDiscoveryMode::Async) {
+                auto overflow = client.CreateSession();
+                UNIT_ASSERT(overflow.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(overflow.GetValue().GetStatus(), EStatus::CLIENT_LIMITS_REACHED);
+                UNIT_ASSERT(!session.HasValue());
+            } else {
+                UNIT_ASSERT(session.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(session.GetValue().GetStatus(), EStatus::UNAVAILABLE);
+            }
+            discovery.Publish.Signal();
+            if (mode == EDiscoveryMode::Async) {
+                UNIT_ASSERT(session.Wait(TDuration::Seconds(10)) && session.GetValue().IsSuccess());
+            }
+            UNIT_ASSERT(discovery.Reopened.WaitT(TDuration::Seconds(10)));
+            driver.Stop(true);
+            UNIT_ASSERT(discovery.Cancelled.WaitT(TDuration::Seconds(2)));
+            UNIT_ASSERT_VALUES_EQUAL(discovery.Subscriptions.load(), 2);
         }
     }
 

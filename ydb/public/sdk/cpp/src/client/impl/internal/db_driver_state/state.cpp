@@ -40,12 +40,7 @@ TDbDriverState::TDbDriverState(
     , DiscoveryMode(discoveryMode)
     , SslCredentials(sslCredentials)
     , Client(client)
-    , EndpointPool([this, client]() mutable {
-        // this callback will be called just after shared_ptr initialization
-        // so this call is safe
-        auto self = shared_from_this();
-        return client->GetEndpoints(self);
-    }, client)
+    , EndpointPool(*this)
     , StatCollector(
         database,
         client->GetMetricRegistry(),
@@ -57,6 +52,12 @@ TDbDriverState::TDbDriverState(
 {
     EndpointPool.SetStatCollector(StatCollector);
     Log.SetFormatter(GetPrefixLogFormatter(GetDatabaseLogPrefix(Database)));
+}
+
+TDbDriverState::~TDbDriverState() {
+    if (DiscoveryReader) {
+        DiscoveryReader->Cancel();
+    }
 }
 
 void TDbDriverState::InitCredentials(
@@ -143,10 +144,15 @@ TPeriodicCb CreatePeriodicDiscoveryTask(TDbDriverState::TPtr driverState) {
         if (!strong) {
             return false;
         } else {
-
             bool pessThreshold = strong->EndpointPool.GetPessimizationRatio() > PESSIMIZATION_DISCOVERY_THRESHOLD;
             bool expiration = strong->EndpointPool.TimeSinceLastUpdate() > ENDPOINT_UPDATE_PERIOD;
 
+            if (strong->Streaming) {
+                if (pessThreshold || expiration) {
+                    strong->EndpointPool.RestoreDiscoveryPriorities();
+                }
+                return true;
+            }
             if (pessThreshold) {
                 strong->StatCollector.IncDiscoveryDuePessimization();
             }

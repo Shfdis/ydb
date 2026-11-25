@@ -17,10 +17,10 @@ namespace NYdb::inline Dev {
 struct TListEndpointsResult {
     Ydb::Discovery::ListEndpointsResult Result;
     TPlainStatus DiscoveryStatus;
+    bool FromStream = false;
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
-using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult()>;
 
 struct TEndpointUpdateResult {
     std::vector<std::string> Removed;
@@ -29,14 +29,14 @@ struct TEndpointUpdateResult {
 
 class TEndpointPool {
 public:
-    TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client);
-    ~TEndpointPool();
+    explicit TEndpointPool(TDbDriverState& state);
     std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync();
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);
     void BanNodeId(std::uint64_t nodeId);
     int GetPessimizationRatio();
+    void RestoreDiscoveryPriorities();
     bool LinkObjToEndpoint(const TEndpointKey& endpoint, TEndpointObj* obj, const void* tag);
     void ForEachEndpoint(const TEndpointElectorSafe::THandleCb& cb, const void* tag) const;
     void ForEachLocalEndpoint(const TEndpointElectorSafe::THandleCb& cb, const void* tag) const;
@@ -53,7 +53,7 @@ private:
     EPileState GetPileState(const Ydb::Bridge::PileState::State& state) const;
 
 private:
-    TListEndpointsResultProvider Provider_;
+    TDbDriverState& State_;
     std::mutex Mutex_;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;

@@ -1,8 +1,12 @@
 #define INCLUDE_YDB_INTERNAL_H
 #include "grpc_connections.h"
 
+#include <library/cpp/threading/future/core/coroutine_traits.h>
+
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/exceptions/exceptions.h>
 #include <ydb/public/sdk/cpp/src/client/impl/observability/constants.h>
+
+#include <util/generic/is_in.h>
 
 #include <string>
 #include <thread>
@@ -719,6 +723,9 @@ void TGRpcConnectionsImpl::SetGrpcCompressionAlgorithm(NYdbGrpc::TGRpcClientConf
 }
 
 TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr dbState) {
+    if (dbState->Streaming) {
+        return ReadEndpointSnapshot(std::move(dbState));
+    }
     Ydb::Discovery::ListEndpointsRequest request;
     request.set_database(TStringType{dbState->Database});
 
@@ -759,8 +766,95 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         if (strong && result.DiscoveryStatus.IsTransportError()) {
             strong->StatCollector.IncDiscoveryFailDueTransportError();
         }
-        return NThreading::MakeFuture<TListEndpointsResult>(MutateDiscovery(std::move(result), strong.get()));
+        result = MutateDiscovery(std::move(result), strong.get());
+        if (strong) {
+            strong->Streaming = result.DiscoveryStatus.Ok() &&
+                IsIn(result.Result.features(), Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
+        }
+        return NThreading::MakeFuture(std::move(result));
     });
+}
+
+TAsyncListEndpointsResult TGRpcConnectionsImpl::ReadEndpointSnapshot(TDbDriverStatePtr state) {
+    using TService = Ydb::Discovery::V1::DiscoveryService;
+    using TRequest = Ydb::Discovery::ListEndpointsRequest;
+    using TResult = Ydb::Discovery::ListEndpointsResult;
+    using TReader = NYdbGrpc::IStreamRequestReadProcessor<TResult>::TPtr;
+
+    if (!state->DiscoveryReader) {
+        TRequest request;
+        request.set_database(TStringType{state->Database});
+        auto opened = NThreading::NewPromise<TReader>();
+        StartReadStream<TService, TRequest, TResult>(request,
+            [opened](TPlainStatus, TReader reader) mutable { opened.SetValue(std::move(reader)); },
+            &TService::Stub::AsyncStreamListEndpoints, state, {});
+        state->DiscoveryReader = co_await opened.GetFuture();
+    }
+
+    auto weak = state->weak_from_this();
+    auto reader = state->DiscoveryReader;
+    state.reset();
+    if (reader) {
+        TResult snapshot;
+        auto received = NThreading::NewPromise<TListEndpointsResult>();
+        reader->Read(&snapshot, [this, weak, &snapshot, received](NYdbGrpc::TGrpcStatus&& status) mutable {
+            if (!status.Ok()) {
+                received.SetValue({{}, TPlainStatus(status)});
+                return;
+            }
+            auto deliver = [this, weak, received, snapshot = std::move(snapshot), stop = StopState_]() mutable {
+                TSdkCallbackGuard guard(stop);
+                auto live = weak.lock();
+                if (!guard.IsEntered() || !live) {
+                    received.SetValue({{}, MakeClientStoppedStatus()});
+                    return;
+                }
+                TPlainStatus status(EStatus::SUCCESS, {}, live->DiscoveryEndpoint, {});
+                received.SetValue(MutateDiscovery({std::move(snapshot), std::move(status), true}, live.get()));
+            };
+            try {
+                ResponseQueue_->Post(std::move(deliver));
+            } catch (...) {
+                received.SetValue({{}, MakeClientStoppedStatus()});
+            }
+        });
+        auto result = co_await NThreading::AsExtractingAwaitable(received.GetFuture());
+        if (result.DiscoveryStatus.Ok()) {
+            co_return result;
+        }
+        reader->Cancel();
+    }
+
+    if (!weak.expired() && co_await ScheduleFuture(TDuration::Seconds(1))) {
+        if (auto live = weak.lock()) {
+            live->DiscoveryReader = nullptr;
+            live->Streaming = false;
+            co_return co_await GetEndpoints(std::move(live));
+        }
+    }
+    if (auto live = weak.lock()) {
+        live->Streaming = false;
+    }
+    co_return TListEndpointsResult{{}, MakeClientStoppedStatus()};
+}
+
+NThreading::TFuture<TEndpointUpdateResult> TGRpcConnectionsImpl::WaitForStreamUpdate(
+    NThreading::TFuture<TEndpointUpdateResult> update, TDeadline deadline) {
+    auto timer = CreateContext();
+    if (!timer) {
+        co_return TEndpointUpdateResult{{}, MakeClientStoppedStatus()};
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+        deadline.GetTimePoint() - TDeadline::Clock::now());
+    auto expired = ScheduleFuture(remaining, timer);
+    co_await NThreading::WaitAny(update.IgnoreResult(), expired.IgnoreResult());
+    timer->Cancel();
+    if (update.IsReady()) {
+        co_return update.GetValue();
+    }
+    co_return TEndpointUpdateResult{{}, expired.GetValue()
+        ? TPlainStatus(EStatus::CLIENT_DEADLINE_EXCEEDED, "Request deadline exceeded while waiting for endpoints")
+        : MakeClientStoppedStatus()};
 }
 
 TListEndpointsResult TGRpcConnectionsImpl::MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState) {
@@ -777,7 +871,12 @@ TListEndpointsResult TGRpcConnectionsImpl::MutateDiscovery(TListEndpointsResult 
         .DiscoveryEndpoint = dbDriverState->DiscoveryEndpoint
     };
 
-    ydbStatus = DiscoveryMutatorCb(&result.Result, std::move(ydbStatus), aux);
+    try {
+        ydbStatus = DiscoveryMutatorCb(&result.Result, std::move(ydbStatus), aux);
+    } catch (...) {
+        result.DiscoveryStatus = TPlainStatus::Internal(CurrentExceptionMessage());
+        return result;
+    }
 
     auto issues = ydbStatus.GetIssues();
 
