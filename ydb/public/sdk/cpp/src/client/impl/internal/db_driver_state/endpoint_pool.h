@@ -35,7 +35,7 @@ class TEndpointPool {
 public:
     explicit TEndpointPool(TDbDriverState& state);
     ~TEndpointPool();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(const std::string& fromGeneration = {});
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(bool longPoll = false);
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);
@@ -60,6 +60,7 @@ private:
     TDbDriverState& State_;
     std::atomic<bool> PollScheduled_{false};
     std::mutex Mutex_;
+    std::string Generation_;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;
     std::atomic_uint64_t LastUpdateTime_;
