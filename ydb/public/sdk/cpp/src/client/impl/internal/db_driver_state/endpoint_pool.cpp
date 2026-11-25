@@ -29,7 +29,7 @@ TEndpointPool::~TEndpointPool() {
 
 std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(bool longPoll) {
     NThreading::TFuture<TEndpointUpdateResult> future;
-    std::uint64_t fromGeneration = 0;
+    std::string snapshotHash;
     {
         std::lock_guard guard(Mutex_);
         if (DiscoveryPromise_.Initialized()) {
@@ -39,12 +39,13 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             future = DiscoveryPromise_.GetFuture();
         }
         if (longPoll) {
-            fromGeneration = Generation_;
+            snapshotHash = SnapshotHash_;
         }
     }
     auto state = State_.shared_from_this();
-    auto handler = [this, state, started = std::chrono::steady_clock::now()](const TAsyncListEndpointsResult& future) {
+    auto handler = [this, state, polling = !snapshotHash.empty(), started = std::chrono::steady_clock::now()](const TAsyncListEndpointsResult& future) {
         TListEndpointsResult result = future.GetValue();
+        const bool pollExpired = polling && result.DiscoveryStatus.Status == EStatus::CLIENT_DEADLINE_EXCEEDED;
         std::vector<std::string> removed;
         if (result.DiscoveryStatus.Status == EStatus::SUCCESS) {
             std::vector<TEndpointRecord> records;
@@ -121,7 +122,7 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             LastUpdateTime_ = TInstant::Now().MicroSeconds();
             removed = Elector_.SetNewState(std::move(records));
         }
-        if (state->LongPolling && state->DiscoveryMode == EDiscoveryMode::Sync) {
+        if (!pollExpired && state->LongPolling && state->DiscoveryMode == EDiscoveryMode::Sync) {
             std::unique_lock guard(state->LastDiscoveryStatusRWLock);
             state->LastDiscoveryStatus = result.DiscoveryStatus;
         }
@@ -130,12 +131,22 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
         {
             std::lock_guard guard(Mutex_);
             DiscoveryPromise_.Swap(promise);
-            if (result.DiscoveryStatus.Ok() || result.DiscoveryStatus.Status == EStatus::CLIENT_CANCELLED) {
-                state->LongPolling = result.DiscoveryStatus.Ok() && result.SupportsLongPolling();
+            if (result.DiscoveryStatus.Ok()) {
+                // An empty reply to a poll asks for a fresh snapshot.
+                const bool reset = polling && result.Result.endpoints().empty();
+                state->LongPolling = reset || !result.Result.snapshot_hash().empty();
+            } else if (result.DiscoveryStatus.Status == EStatus::CLIENT_CANCELLED) {
+                state->LongPolling = false;
             }
-            Generation_ = state->LongPolling && result.DiscoveryStatus.Ok() && !result.Result.endpoints().empty()
-                ? result.Result.generation() : 0;
+            if (!pollExpired) {
+                SnapshotHash_ = state->LongPolling && result.DiscoveryStatus.Ok() && !result.Result.endpoints().empty()
+                    ? std::string(result.Result.snapshot_hash()) : std::string{};
+            }
             schedule = state->LongPolling && !PollScheduled_.exchange(true);
+        }
+        if (pollExpired) {
+            // The poll deadline renews the wait with the last known snapshot.
+            result.DiscoveryStatus = {};
         }
         if (schedule) {
             const TDuration elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started);
@@ -152,7 +163,7 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
         promise.SetValue({std::move(removed), std::move(result.DiscoveryStatus)});
     };
 
-    state->Client->GetEndpoints(state, fromGeneration).Subscribe(handler);
+    state->Client->GetEndpoints(state, snapshotHash).Subscribe(handler);
     return {future, true};
 }
 

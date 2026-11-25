@@ -9,7 +9,6 @@
 #include <ydb/public/sdk/cpp/src/client/impl/endpoints/endpoints.h>
 
 #include <library/cpp/threading/future/future.h>
-#include <util/generic/is_in.h>
 
 #include <mutex>
 
@@ -18,11 +17,6 @@ namespace NYdb::inline Dev {
 struct TListEndpointsResult {
     Ydb::Discovery::ListEndpointsResult Result;
     TPlainStatus DiscoveryStatus;
-
-    bool SupportsLongPolling() const {
-        return IsIn(Result.features(), Ydb::Discovery::ListEndpointsResult::LONG_POLLING)
-            && (Result.generation() != 0 || Result.endpoints().empty());
-    }
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
@@ -61,7 +55,7 @@ private:
     TDbDriverState& State_;
     std::atomic<bool> PollScheduled_{false};
     std::mutex Mutex_;
-    std::uint64_t Generation_ = 0;
+    std::string SnapshotHash_;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;
     std::atomic_uint64_t LastUpdateTime_;

@@ -397,16 +397,16 @@ not-base64
             endpoint->set_port(tablePort);
             discovery.OnListEndpoints = [&](const auto& request, auto& snapshot) {
                 const int call = ++calls;
-                const std::uint64_t expected = call == 2 ? 17 : call == 5 ? 18 : 0;
-                if (call > 5 || request.from_generation() != expected) {
+                const auto* expected = call == 2 ? "initial" : call == 5 ? "restored" : "";
+                if (call > 5 || request.snapshot_hash() != expected) {
                     unexpectedPoll.Signal();
                 }
-                snapshot.add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
-                if (call < 5) {
-                    snapshot.add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
-                }
-                if (call == 1 || call >= 4) {
-                    snapshot.set_generation(call == 1 ? 17 : 18);
+                if (call == 1) {
+                    snapshot.set_snapshot_hash("initial");
+                } else if (call == 3) {
+                    snapshot.set_snapshot_hash("empty");
+                } else if (call == 4) {
+                    snapshot.set_snapshot_hash("restored");
                 }
                 if (call == 2 || call == 3) {
                     snapshot.clear_endpoints();
@@ -415,6 +415,7 @@ not-base64
                     emptyApplied.Signal();
                     resume.WaitT(TDuration::Seconds(10));
                 } else if (call == 5) {
+                    // An older server reply still serves the endpoints and stops long polling.
                     restored.Signal();
                 }
             };

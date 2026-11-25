@@ -74,8 +74,7 @@ def _long_poll_snapshot(reply):
     assert reply.operation.status == StatusIds.SUCCESS
     result = discovery.ListEndpointsResult()
     assert reply.operation.result.Unpack(result)
-    assert result.LONG_POLLING in result.features
-    assert result.generation or not result.endpoints
+    assert result.snapshot_hash or not result.endpoints
     return result
 
 
@@ -116,27 +115,36 @@ def test_reset_discovery_long_polls(enabled):
                 return True
 
             assert wait_for(all_ports_present, timeout_seconds=20, step_seconds=0.2)
-            versions = [_long_poll_snapshot(rpc(ordinary, timeout=5)).generation for rpc in rpcs]
+            hashes = [_long_poll_snapshot(rpc(ordinary, timeout=5)).snapshot_hash for rpc in rpcs]
             polls = []
             for index, rpc in enumerate(rpcs):
-                request = discovery.ListEndpointsRequest(database="/Root", from_generation=versions[index - 1])
-                assert _long_poll_snapshot(rpc(request, timeout=5)).generation == versions[index]
-                request.from_generation = versions[index]
-                polls.append((rpc, rpc.future(request, timeout=25)))
+                request = discovery.ListEndpointsRequest(database="/Root", snapshot_hash=b"stale")
+                assert _long_poll_snapshot(rpc(request, timeout=5)).snapshot_hash == hashes[index]
+                request.snapshot_hash = hashes[1 - index]
+                if request.snapshot_hash != hashes[index]:
+                    # This node returns a different client-visible snapshot.
+                    assert _long_poll_snapshot(rpc(request, timeout=5)).snapshot_hash == hashes[index]
+                    request.snapshot_hash = hashes[index]
+                polls.append((rpc, rpc.future(request, timeout=25), hashes[index]))
+            with pytest.raises(grpc.RpcError) as expired:
+                rpcs[-1](request, timeout=0.3)
+            assert expired.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
             assert requests.get(url, headers=admin, timeout=5).status_code == 400
             assert requests.post(url, headers={"Authorization": "reader@builtin"}, timeout=5).status_code == 403
-            for _, poll in polls:
+            for _, poll, _ in polls:
                 with pytest.raises(grpc.FutureTimeoutError):
                     poll.result(timeout=0.5)
 
             response = requests.post(url, headers=admin, timeout=10)
             assert response.status_code == 200, response.text
             assert response.json()["reset_polls"] == len(polls)
-            for rpc, poll in polls:
+            for rpc, poll, snapshot_hash in polls:
                 reset = _long_poll_snapshot(poll.result(timeout=5))
                 assert not reset.endpoints
-                assert reset.generation == 0
-                assert ports <= {ep.port for ep in _long_poll_snapshot(rpc(ordinary, timeout=5)).endpoints}
+                assert not reset.snapshot_hash
+                refreshed = _long_poll_snapshot(rpc(ordinary, timeout=5))
+                assert ports <= {ep.port for ep in refreshed.endpoints}
+                assert refreshed.snapshot_hash == snapshot_hash
             assert requests.post(url, headers=admin, timeout=5).json()["reset_polls"] == 0
     finally:
         cluster.stop()
@@ -371,7 +379,7 @@ class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
             list_endpoints = DiscoveryServiceStub(channel).ListEndpoints
             request = discovery.ListEndpointsRequest(database=self.database_name)
             initial = _long_poll_snapshot(list_endpoints(request, timeout=5))
-            request.from_generation = initial.generation
+            request.snapshot_hash = initial.snapshot_hash
             pending = [list_endpoints.future(request, timeout=25) for _ in range(2)]
             with pytest.raises(grpc.FutureTimeoutError):
                 pending[0].result(timeout=1)
@@ -380,11 +388,11 @@ class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
             for call in pending:
                 result = _long_poll_snapshot(call.result())
                 assert {ep.port for ep in result.endpoints} == expected
-                assert result.generation != initial.generation
+                assert result.snapshot_hash != initial.snapshot_hash
             # The board changed before this poll started.
             current = _long_poll_snapshot(list_endpoints(request, timeout=5))
             assert {ep.port for ep in current.endpoints} == expected
-            assert current.generation != initial.generation
+            assert current.snapshot_hash != initial.snapshot_hash
 
     def extract_fault(self, slot):
         slot.start()

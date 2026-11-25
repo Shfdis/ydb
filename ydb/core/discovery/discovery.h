@@ -54,12 +54,17 @@ struct TEvDiscovery {
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
         TEvStateStorage::TEvBoardInfo::EStatus Status;
-        ui64 Generation = 0;
-        bool WaitingForChange = false;
     };
 };
 
 namespace NDiscovery {
+
+struct TListEndpointsOptions {
+    TString SnapshotHash;
+    TString EndpointId;
+    TSet<TString> Services;
+    bool Ssl = false;
+};
 
 class TCachedMessageData {
 public:
@@ -69,7 +74,8 @@ public:
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
     TEvStateStorage::TEvBoardInfo::EStatus Status;
-    ui64 Generation = 0;
+    TString SnapshotHash;
+    TString SnapshotHashSsl;
 
 public:
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
@@ -89,13 +95,12 @@ public:
                         const TString& endpointId = {},
                         const TSet<TString>& services = {},
                         TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok,
-                        ui64 generation = 0)
+                        bool longPolling = false)
         : InfoEntries(std::move(infoEntries))
         , BridgeInfo(bridgeInfo)
         , Status(status)
-        , Generation(generation)
     {
-        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
+        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services, longPolling);
     }
 
     bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
@@ -103,7 +108,7 @@ public:
     void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
-                        const TSet<TString>& services = {});
+                        const TSet<TString>& services = {}, bool longPolling = false);
 
     TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool allowEmpty = false) const;
 };
@@ -120,7 +125,7 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId, ui64 fromGeneration = 0);
+    const TActorId& cacheId, NDiscovery::TListEndpointsOptions options = {});
 
 IActor* CreateDiscoveryResetService(TActorId cache);
 

@@ -11,9 +11,8 @@ import "ydb/public/api/protos/ydb_operation.proto";
 message ListEndpointsRequest {
     string database = 1;
     repeated string service = 2;
-    // Echo the last generation for the same database and filters to wait for a change.
-    // Zero or an unknown generation requests the current snapshot immediately.
-    uint64 from_generation = 3;
+    // Echo the previous snapshot hash to wait for a change. Empty requests the current snapshot.
+    bytes snapshot_hash = 3;
 }
 
 message EndpointInfo {
@@ -49,17 +48,9 @@ message ListEndpointsResult {
     // This field is empty if cluster is not in bridge mode.
     repeated Ydb.Bridge.PileState pile_states = 3;
 
-    enum Feature {
-        FEATURE_UNSPECIFIED = 0;
-        LONG_POLLING = 1;
-        STREAM_LIST_ENDPOINTS = 2;
-    }
-    // Discovery modes supported by this server. Only advertised modes may be used.
-    repeated Feature features = 4;
-
-    // Snapshot version local to this discovery server. Compare for equality only.
-    // A reset returns an empty endpoint list and zero to request a fresh discovery.
-    uint64 generation = 5;
+    // Echo this opaque hash in a request to wait for a snapshot change.
+    // An operator reset returns an empty snapshot and hash.
+    bytes snapshot_hash = 5;
 }
 
 message ListEndpointsResponse {
