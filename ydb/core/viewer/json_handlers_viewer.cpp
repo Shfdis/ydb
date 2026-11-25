@@ -332,7 +332,7 @@ void InitViewerTextStreamCounterHandler(TJsonHandlers& handlers) {
 
 void InitViewerJsonHandlers(TJsonHandlers& jsonHandlers) {
     const auto& ns = AppData()->DynamicNameserviceConfig;
-    if (AppData()->FeatureFlags.GetEnableDiscoveryReset() &&
+    if (AppData()->FeatureFlags.GetEnableDiscoveryLongPolling() &&
         (!ns || TActivationContext::ActorSystem()->NodeId <= ns->MaxStaticNodeId)) {
         jsonHandlers.AddHandler("/viewer/reset_discovery_streams", new TJsonHandler<TResetDiscovery>(TResetDiscovery::GetSwagger()));
     }

@@ -83,7 +83,7 @@ def test_reset_discovery_long_polls(enabled):
     admin = {"Authorization": "root@builtin"}
     config = KikimrConfigGenerator(
         nodes=2, erasure=types.Erasure.NONE, default_clusteradmin="root@builtin",
-        extra_feature_flags=["enable_discovery_reset"] if enabled else [],
+        extra_feature_flags=["enable_discovery_long_polling"] if enabled else [],
     )
     config.yaml_config["domains_config"]["security_config"].setdefault("viewer_allowed_sids", []).append("reader@builtin")
     cluster = KiKiMR(config)
@@ -91,10 +91,6 @@ def test_reset_discovery_long_polls(enabled):
     try:
         node = cluster.nodes[1]
         url = f"http://{node.host}:{node.mon_port}/viewer/reset_discovery_streams"
-        if not enabled:
-            assert requests.post(url, headers=admin, timeout=5).status_code == 404
-            return
-
         with ExitStack() as channels:
             ports = {frontend.grpc_port for frontend in cluster.nodes.values()}
             rpcs = [DiscoveryServiceStub(channels.enter_context(grpc.insecure_channel(frontend.endpoint))).ListEndpoints
@@ -115,6 +111,17 @@ def test_reset_discovery_long_polls(enabled):
                 return True
 
             assert wait_for(all_ports_present, timeout_seconds=20, step_seconds=0.2)
+            if not enabled:
+                for rpc in rpcs:
+                    for snapshot_hash in (b"", b"previous"):
+                        reply = rpc(discovery.ListEndpointsRequest(database="/Root", snapshot_hash=snapshot_hash), timeout=5)
+                        result = discovery.ListEndpointsResult()
+                        assert reply.operation.status == StatusIds.SUCCESS and reply.operation.result.Unpack(result)
+                        assert ports <= {ep.port for ep in result.endpoints}
+                        assert not result.snapshot_hash
+                assert requests.post(url, headers=admin, timeout=5).status_code == 404
+                return
+
             hashes = [_long_poll_snapshot(rpc(ordinary, timeout=5)).snapshot_hash for rpc in rpcs]
             polls = []
             for index, rpc in enumerate(rpcs):
@@ -253,7 +260,7 @@ class TestDiscoveryExtEndpoint(object):
 class AbstractTestDiscoveryFaultInjection(object):
     @classmethod
     def setup_class(cls):
-        cls.cluster = KiKiMR()
+        cls.cluster = KiKiMR(configurator=KikimrConfigGenerator(extra_feature_flags=["enable_discovery_long_polling"]))
         cls.cluster.start()
         cls.database_name = '/Root/database'
         cls.logger = logger.getChild(cls.__name__)

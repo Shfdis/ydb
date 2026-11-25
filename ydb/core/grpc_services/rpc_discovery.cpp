@@ -45,7 +45,7 @@ public:
         options.EndpointId = Request->GetEndpointId();
         options.Services.insert(request.service().begin(), request.service().end());
         options.Ssl = Request->SslServer();
-        if (AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery() && !request.snapshot_hash().empty()) {
+        if (AppData()->FeatureFlags.GetEnableDiscoveryLongPolling() && !request.snapshot_hash().empty()) {
             options.SnapshotHash = request.snapshot_hash();
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
                 system->Send(self, new TEvents::TEvPoisonPill);
@@ -129,7 +129,7 @@ public:
 TActorId RegisterDiscoveryResetService(const TActorContext& ctx, bool servesLongPolls) {
     auto* system = ctx.ActorSystem();
     // All discovery frontends use the primary request proxy on this node.
-    if (!AppData(ctx)->FeatureFlags.GetEnableDiscoveryReset() ||
+    if (!AppData(ctx)->FeatureFlags.GetEnableDiscoveryLongPolling() ||
         system->LookupLocalService(CreateGRpcRequestProxyId()) != ctx.SelfID) {
         return {};
     }

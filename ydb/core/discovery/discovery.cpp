@@ -328,7 +328,7 @@ namespace NDiscoveryPrivate {
             const bool trusted = !ev->InterconnectSession ||
                 (ev->OriginScopeId.first == 0 && (!ns || ev->Sender.NodeId() <= ns->MaxStaticNodeId));
             auto reply = MakeHolder<TEvDiscovery::TEvResetEndpointsResult>();
-            if (trusted && AppData()->FeatureFlags.GetEnableDiscoveryReset()) {
+            if (trusted && AppData()->FeatureFlags.GetEnableDiscoveryLongPolling()) {
                 if (Cache) {
                     TActivationContext::Send(new IEventHandle(Cache, ev->Sender,
                         new TEvDiscovery::TEvResetEndpoints(), 0, ev->Cookie));
@@ -341,6 +341,8 @@ namespace NDiscoveryPrivate {
     };
 
     class TDiscoveryCache: public TActorBootstrapped<TDiscoveryCache> {
+        bool LongPolling = false;
+        bool UseBoardSubscriptions = false;
         THashMap<TString, std::shared_ptr<NDiscovery::TCachedMessageData>> CurrentCachedMessages;
         THashMap<TString, std::shared_ptr<NDiscovery::TCachedMessageData>> DirtyCachedMessages;
 
@@ -380,7 +382,7 @@ namespace NDiscoveryPrivate {
             auto result = Requested.emplace(database, TVector<TWaiter>());
             if (result.second) {
                 auto mode = EBoardLookupMode::Second;
-                if (AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+                if (UseBoardSubscriptions) {
                     mode = EBoardLookupMode::Subscription;
                 }
                 auto cookie = ++LastCookie;
@@ -420,10 +422,10 @@ namespace NDiscoveryPrivate {
             TMaybe<NDiscovery::TCachedMessageData> filtered;
             if (!options.EndpointId.empty() || !options.Services.empty()) {
                 filtered.ConstructInPlace(data.InfoEntries, NameserviceResponse, data.BridgeInfo,
-                    options.EndpointId, options.Services, data.Status, AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery());
+                    options.EndpointId, options.Services, data.Status, LongPolling);
                 view = &*filtered;
             }
-            const bool polling = !options.SnapshotHash.empty();
+            const bool polling = LongPolling && !options.SnapshotHash.empty();
             if (polling && options.SnapshotHash == (options.Ssl ? view->SnapshotHashSsl : view->SnapshotHash) &&
                 data.Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok) {
                 WaitingForChange[path].emplace(waiter.ActorId, waiter);
@@ -434,7 +436,7 @@ namespace NDiscoveryPrivate {
 
         void Handle(TEvDiscovery::TEvResetEndpoints::TPtr& ev) {
             auto reply = MakeHolder<TEvDiscovery::TEvResetEndpointsResult>();
-            if (!ev->InterconnectSession && AppData()->FeatureFlags.GetEnableDiscoveryReset()) {
+            if (!ev->InterconnectSession && AppData()->FeatureFlags.GetEnableDiscoveryLongPolling()) {
                 const TString message = NDiscovery::SerializeResult(Ydb::Discovery::ListEndpointsResult{});
                 NDiscovery::TCachedMessageData empty(message, message, {});
                 ui64 polls = 0;
@@ -462,8 +464,7 @@ namespace NDiscoveryPrivate {
         }
 
         void RefreshSnapshot(NDiscovery::TCachedMessageData& data) {
-            data.UpdateCache(NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}), {},
-                AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery());
+            data.UpdateCache(NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}), {}, LongPolling);
         }
 
         void Handle(TEvInterconnect::TEvNodeInfo::TPtr &ev) {
@@ -474,7 +475,7 @@ namespace NDiscoveryPrivate {
         void Handle(TEvStateStorage::TEvBoardInfoUpdate::TPtr ev) {
             YDB_LOG_TRACE_COMP(NKikimrServices::DISCOVERY_CACHE, "Handle",
                 {"ev", ev->Get()->ToString()});
-            if (!AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+            if (!UseBoardSubscriptions) {
                 return;
             }
             THolder<TEvStateStorage::TEvBoardInfoUpdate> msg = ev->Release();
@@ -521,12 +522,11 @@ namespace NDiscoveryPrivate {
             Y_ABORT_UNLESS(!IsBridgeMode(ActorContext()) || BridgeInfo);
 
             auto newCachedData = std::make_shared<NDiscovery::TCachedMessageData>(std::move(msg->InfoEntries),
-                NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}), TSet<TString>{}, msg->Status,
-                AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery());
+                NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}), TSet<TString>{}, msg->Status, LongPolling);
             DirtyCachedMessages.erase(path);
             NotifyWaiters(path, *newCachedData);
 
-            if (AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+            if (UseBoardSubscriptions) {
                 if (msg->Status != TEvStateStorage::TEvBoardInfo::EStatus::Ok) {
                     CurrentCachedMessages.erase(path);
                     CachedNotAvailable[path] = newCachedData;
@@ -547,9 +547,7 @@ namespace NDiscoveryPrivate {
         }
 
         void Wakeup() {
-            auto enableSubscriptions = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-
-            if (enableSubscriptions) {
+            if (UseBoardSubscriptions) {
                 CachedNotAvailable.clear();
             } else {
                 OldCachedMessages.swap(CurrentCachedMessages);
@@ -577,11 +575,9 @@ namespace NDiscoveryPrivate {
                 return;
             }
 
-            auto enableSubscriptions = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-
             const auto* cachedData = CurrentCachedMessages.FindPtr(msg->Database);
             if (cachedData == nullptr) {
-                if (enableSubscriptions) {
+                if (UseBoardSubscriptions) {
                     cachedData = CachedNotAvailable.FindPtr(msg->Database);
                     if (cachedData == nullptr) {
                         Request(msg->Database, waiter);
@@ -631,6 +627,9 @@ namespace NDiscoveryPrivate {
         }
 
         void Bootstrap(const TActorContext& ctx) {
+            const auto& flags = AppData(ctx)->FeatureFlags;
+            LongPolling = flags.GetEnableDiscoveryLongPolling();
+            UseBoardSubscriptions = LongPolling || flags.GetEnableSubscriptionsInDiscovery();
             Send(NameserviceActorId.GetOrElse(GetNameserviceActorId()), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
             if (IsBridgeMode(ctx)) {
                 const TActorId wardenId = MakeBlobStorageNodeWardenID(SelfId().NodeId());
