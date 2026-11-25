@@ -48,7 +48,6 @@ message ListEndpointsResult {
 
     enum Feature {
         FEATURE_UNSPECIFIED = 0;
-        LONG_POLLING = 1;
         STREAM_LIST_ENDPOINTS = 2;
     }
     // Discovery modes supported by this server.

@@ -417,7 +417,6 @@ not-base64
                     return grpc::Status::OK;
                 }
             } discovery;
-            discovery.MockResults["/Root"].add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
             discovery.MockResults["/Root"].add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
             auto* endpoint = discovery.Standby.add_endpoints();
             endpoint->set_address("standby.invalid");
