@@ -39,6 +39,7 @@ struct TEvDiscovery {
     struct TEvDiscoveryData : public TEventLocal<TEvDiscoveryData, EvDiscoveryData> {
         TString CachedMessage;
         TString CachedMessageSsl;
+        TString SelfLocation;
 
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
@@ -55,11 +56,9 @@ public:
 
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
-    TEvStateStorage::TEvBoardInfo::EStatus Status = TEvStateStorage::TEvBoardInfo::EStatus::Unknown;
+    TEvStateStorage::TEvBoardInfo::EStatus Status;
 
 public:
-    TCachedMessageData() = default;
-
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
                         const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& infoEntries,
                         const TBridgeInfo::TPtr& bridgeInfo = nullptr,
@@ -72,27 +71,31 @@ public:
     {}
 
     TCachedMessageData(TMap<TActorId, TEvStateStorage::TBoardInfoEntry> infoEntries,
-                        const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
+                        const TString& selfLocation,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
                         const TSet<TString>& services = {},
-                        TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok,
-                        bool bareResult = false)
+                        TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok)
         : InfoEntries(std::move(infoEntries))
         , BridgeInfo(bridgeInfo)
         , Status(status)
     {
-        UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services, bareResult);
+        UpdateCache(selfLocation, bridgeInfo, endpointId, services);
     }
 
-    void UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
+    bool UpdateEntries(TMap<TActorId, TEvStateStorage::TBoardInfoEntry>&& newInfoEntries);
 
-    void UpdateCache(const THolder<TEvInterconnect::TEvNodeInfo>& nameserviceResponse,
+    void UpdateCache(const TString& selfLocation,
                         const TBridgeInfo::TPtr& bridgeInfo,
                         const TString& endpointId = {},
-                        const TSet<TString>& services = {}, bool bareResult = false);
+                        const TSet<TString>& services = {});
 
-    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool allowEmpty = false) const;
+    const TString& GetMessage(bool ssl, bool stream) const;
+    TEvDiscovery::TEvDiscoveryData* ToEvent(bool returnSerializedMessage, bool stream = false) const;
+
+private:
+    TString SelfLocation;
+    mutable TString StreamMessage, StreamMessageSsl;
 };
 
 }

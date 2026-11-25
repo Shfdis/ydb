@@ -19,6 +19,7 @@
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/testing/unittest/tests_data.h>
 #include <util/generic/mapfindptr.h>
+#include <util/system/event.h>
 
 #include <atomic>
 #include <functional>
@@ -378,51 +379,73 @@ not-base64
     }
 
     Y_UNIT_TEST(StreamListEndpointsUpdatesTheDriver) {
-        TPortManager ports;
-        TMockTableService table;
-        const auto tablePort = ports.GetPort();
-        auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
-        struct TDiscovery : TMockDiscoveryService {
-            Ydb::Discovery::ListEndpointsResult Replacement;
-            NThreading::TPromise<void> Switch = NThreading::NewPromise<void>();
-            grpc::Status StreamListEndpoints(grpc::ServerContext*, const Ydb::Discovery::ListEndpointsRequest* request,
-                    grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
-                if (request->database() != "/Root") {
-                    return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
+        for (auto mode : {EDiscoveryMode::Sync, EDiscoveryMode::Async}) {
+            TPortManager ports;
+            TMockTableService table;
+            const auto tablePort = ports.GetPort();
+            auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
+            struct TDiscovery : TMockDiscoveryService {
+                Ydb::Discovery::ListEndpointsResult Standby;
+                TManualEvent Empty, Publish, Reopened, Stopped, Cancelled;
+                std::atomic_uint Subscriptions = 0;
+
+                grpc::Status StreamListEndpoints(grpc::ServerContext* context, const Ydb::Discovery::ListEndpointsRequest* request,
+                        grpc::ServerWriter<Ydb::Discovery::ListEndpointsResult>* writer) override {
+                    if (request->database() != "/Root") {
+                        return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown database");
+                    }
+                    if (++Subscriptions == 1) {
+                        writer->Write({});
+                        Empty.Signal();
+                        if (Publish.WaitT(TDuration::Seconds(10))) {
+                            writer->Write(Standby);
+                        }
+                    } else {
+                        writer->Write(Standby);
+                        Reopened.Signal();
+                        if (Stopped.WaitT(TDuration::Seconds(10)) && context->IsCancelled()) {
+                            Cancelled.Signal();
+                        }
+                    }
+                    return grpc::Status::OK;
                 }
-                writer->Write(MockResults.at("/Root"));
-                if (!Switch.GetFuture().Wait(TDuration::Seconds(10))) {
-                    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "switch timed out");
-                }
-                writer->Write({});
-                writer->Write(Replacement);
-                return grpc::Status::OK;
+            } discovery;
+            discovery.MockResults["/Root"].set_use_stream_list_endpoints(true);
+            auto* endpoint = discovery.Standby.add_endpoints();
+            endpoint->set_address("standby.invalid");
+            endpoint->add_ip_v4("127.0.0.1");
+            endpoint->set_port(tablePort);
+            const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
+            auto server = StartGrpcServer(address, discovery);
+            TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root").SetDiscoveryMode(mode).SetMaxQueuedRequests(1));
+            TTableClient client(driver);
+
+            UNIT_ASSERT(discovery.Empty.WaitT(TDuration::Seconds(10)));
+            if (mode == EDiscoveryMode::Async) {
+                auto expired = client.CreateSession(TCreateSessionSettings().ClientTimeout(TDuration::MilliSeconds(100)));
+                UNIT_ASSERT(expired.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(expired.GetValue().GetStatus(), EStatus::CLIENT_DEADLINE_EXCEEDED);
             }
-        } discovery;
-        auto* endpoint = discovery.Replacement.add_endpoints();
-        endpoint->set_address("standby.invalid");
-        endpoint->set_port(tablePort);
-        endpoint->add_ip_v4("127.0.0.1");
-        auto& initial = discovery.MockResults["/Root"];
-        initial = discovery.Replacement;
-        initial.mutable_endpoints(0)->set_ip_v4(0, "127.0.0.2");
-        initial.set_use_stream_list_endpoints(true);
-        const std::string address = TStringBuilder() << "127.0.0.1:" << ports.GetPort();
-        auto discoveryServer = StartGrpcServer(address, discovery);
-        TDriver driver(TDriverConfig().SetEndpoint(address).SetDatabase("/Root"));
-        TTableClient client(driver);
-        const auto settings = TCreateSessionSettings().ClientTimeout(TDuration::Seconds(1));
-        auto first = client.CreateSession(settings).GetValueSync();
-        discovery.Switch.SetValue();
-        UNIT_ASSERT(!first.IsSuccess());
-        const auto deadline = TInstant::Now() + TDuration::Seconds(10);
-        do {
-            if (client.CreateSession(settings).GetValueSync().IsSuccess()) {
-                return;
+            auto session = client.CreateSession();
+            if (mode == EDiscoveryMode::Async) {
+                auto overflow = client.CreateSession();
+                UNIT_ASSERT(overflow.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(overflow.GetValue().GetStatus(), EStatus::CLIENT_LIMITS_REACHED);
+                UNIT_ASSERT(!session.HasValue());
+            } else {
+                UNIT_ASSERT(session.Wait(TDuration::Seconds(2)));
+                UNIT_ASSERT_VALUES_EQUAL(session.GetValue().GetStatus(), EStatus::UNAVAILABLE);
             }
-            Sleep(TDuration::MilliSeconds(10));
-        } while (TInstant::Now() < deadline);
-        UNIT_FAIL("The endpoint from StreamListEndpoints was not installed");
+            discovery.Publish.Signal();
+            if (mode == EDiscoveryMode::Async) {
+                UNIT_ASSERT(session.Wait(TDuration::Seconds(10)) && session.GetValue().IsSuccess());
+            }
+            UNIT_ASSERT(discovery.Reopened.WaitT(TDuration::Seconds(10)));
+            driver.Stop(true);
+            discovery.Stopped.Signal();
+            UNIT_ASSERT(discovery.Cancelled.WaitT(TDuration::Seconds(2)));
+            UNIT_ASSERT_VALUES_EQUAL(discovery.Subscriptions.load(), 2);
+        }
     }
 
     Y_UNIT_TEST(UsingIpAddresses) {

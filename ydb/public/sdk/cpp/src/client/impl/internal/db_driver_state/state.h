@@ -40,7 +40,6 @@ public:
     );
 
     ~TDbDriverState();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateEndpoints();
     NThreading::TFuture<void> DiscoveryCompleted() const;
 
     void SignalDiscoveryCompleted();
@@ -70,7 +69,7 @@ public:
     IInternalClient* Client;
     TEndpointPool EndpointPool;
     std::atomic<bool> Streaming{false};
-    std::function<void()> CancelDiscoveryStream;
+    NYdbGrpc::IStreamRequestReadProcessor<Ydb::Discovery::ListEndpointsResult>::TPtr DiscoveryReader;
     // StopCb allow client to subscribe for notifications from lower layer
     std::mutex NotifyCbsLock;
     std::array<std::vector<TCb>, static_cast<size_t>(ENotifyType::COUNT)> NotifyCbs;

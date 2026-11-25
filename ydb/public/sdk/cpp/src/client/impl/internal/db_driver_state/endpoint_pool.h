@@ -17,23 +17,20 @@ namespace NYdb::inline Dev {
 struct TListEndpointsResult {
     Ydb::Discovery::ListEndpointsResult Result;
     TPlainStatus DiscoveryStatus;
+    bool FromStream = false;
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
-using TListEndpointsResultProvider = std::function<TAsyncListEndpointsResult()>;
 
 struct TEndpointUpdateResult {
     std::vector<std::string> Removed;
     TPlainStatus DiscoveryStatus;
-    bool UseStream;
 };
 
 class TEndpointPool {
 public:
-    TEndpointPool(TListEndpointsResultProvider&& provider, const IInternalClient* client);
-    ~TEndpointPool();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(const TListEndpointsResultProvider& provider = {});
-    void Expire() { LastUpdateTime_ = 0; }
+    explicit TEndpointPool(TDbDriverState& state);
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync();
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);
@@ -55,7 +52,7 @@ private:
     EPileState GetPileState(const Ydb::Bridge::PileState::State& state) const;
 
 private:
-    TListEndpointsResultProvider Provider_;
+    TDbDriverState& State_;
     std::mutex Mutex_;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;

@@ -1,38 +1,31 @@
 #include "grpc_request_proxy.h"
 
 #include "rpc_calls.h"
-#include "rpc_kqp_base.h"
 
 #include <ydb/core/base/appdata.h>
-#include <ydb/core/base/location.h>
 #include <ydb/core/discovery/discovery.h>
 
 #include <yql/essentials/public/issue/yql_issue_message.h>
 #include <yql/essentials/public/issue/yql_issue.h>
 
-#include <ydb/library/actors/core/interconnect.h>
-#include <ydb/library/actors/interconnect/interconnect.h>
 #include <ydb/library/actors/core/hfunc.h>
 
-#include <library/cpp/containers/stack_vector/stack_vec.h>
-#include <util/random/shuffle.h>
+#include <ydb/library/wilson_ids/wilson.h>
 
 namespace NKikimr::NGRpcService {
 
 using namespace NActors;
 using namespace Ydb;
-using namespace NKqp;
 
 class TListEndpointsRPC : public TActorBootstrapped<TListEndpointsRPC> {
     THolder<TEvListEndpointsRequest> Request;
     const bool Streaming;
-    bool WritePending = false;
+    size_t PendingWrites = 0;
+    static constexpr size_t MaxPendingWrites = 8;
     const TActorId CacheId;
     TActorId Discoverer;
 
-    static constexpr size_t MaxPendingSnapshots = 8;
-    TStackVec<THolder<TEvDiscovery::TEvDiscoveryData>, 1> PendingSnapshots;
-    THolder<TEvInterconnect::TEvNodeInfo> NameserviceResponse;
+    bool SentSnapshot = false;
 
     NWilson::TSpan Span;
 
@@ -54,21 +47,15 @@ public:
                 Request->ReplyWithRpcStatus(grpc::StatusCode::UNIMPLEMENTED, "Endpoint subscriptions disabled", {});
                 return PassAway();
             }
+            // Re-resolve the database periodically, including its serverless resources domain.
+            Schedule(TDuration::Minutes(1), new TEvents::TEvWakeup(1));
             auto* system = TActivationContext::ActorSystem();
             Request->SetFinishAction([system, self = SelfId()] { system->Send(self, new TEvents::TEvPoisonPill); });
-            Request->SetStreamingNotify([system, self = SelfId()](size_t queued) {
-                if (!queued) {
-                    system->Send(self, new TEvents::TEvWakeup);
-                }
-            });
+            Request->SetStreamingNotify([system, self = SelfId()](size_t) { system->Send(self, new TEvents::TEvWakeup); });
         }
-        // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
             SelfId(), CacheId, Streaming));
-
-        // request self node info
-        Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
 
         Become(&TThis::StateWait);
     }
@@ -85,33 +72,52 @@ public:
     STATEFN(StateWait) {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvDiscovery::TEvDiscoveryData, Handle);
-            hFunc(TEvInterconnect::TEvNodeInfo, Handle);
             hFunc(TEvDiscovery::TEvError, Handle);
-            sFunc(TEvents::TEvPoison, PassAway);
-            sFunc(TEvents::TEvWakeup, WriteDone);
+            sFunc(TEvents::TEvPoison, Cancel);
+            hFunc(TEvents::TEvWakeup, Handle);
         }
     }
 
-    void WriteDone() {
-        WritePending = false;
-        TryReplyAndDie();
+    void Handle(TEvents::TEvWakeup::TPtr& ev) {
+        if (ev->Get()->Tag) {
+            if (SentSnapshot) {
+                Request->FinishStream(Ydb::StatusIds::SUCCESS);
+            } else {
+                Request->ReplyWithRpcStatus(grpc::StatusCode::UNAVAILABLE, "Endpoint discovery timed out", {});
+            }
+            return PassAway();
+        }
+        --PendingWrites;
+    }
+
+    void Cancel() {
+        Request->ReplyWithRpcStatus(grpc::StatusCode::CANCELLED, {}, {});
+        PassAway();
     }
 
     void Handle(TEvDiscovery::TEvDiscoveryData::TPtr &ev) {
         if (!Streaming) {
             Discoverer = {};
-        } else if (PendingSnapshots.size() == MaxPendingSnapshots) {
+        } else if (PendingWrites == MaxPendingWrites) {
             Request->ReplyWithRpcStatus(grpc::StatusCode::RESOURCE_EXHAUSTED, "Discovery reader fell behind", {});
             return PassAway();
         }
-
-        PendingSnapshots.emplace_back(ev->Release().Release());
-        TryReplyAndDie();
-    }
-
-    void Handle(TEvInterconnect::TEvNodeInfo::TPtr &ev) {
-        NameserviceResponse.Reset(ev->Release().Release());
-        TryReplyAndDie();
+        auto* data = ev->Get();
+        const bool ssl = Request->SslServer();
+        TString message = ssl ? std::move(data->CachedMessageSsl) : std::move(data->CachedMessage);
+        if (message.empty()) {
+            const auto& services = Request->GetProtoRequest()->service();
+            NDiscovery::TCachedMessageData filtered(std::move(data->InfoEntries), data->SelfLocation,
+                data->BridgeInfo, Request->GetEndpointId(), {services.begin(), services.end()});
+            message = filtered.GetMessage(ssl, Streaming);
+        }
+        SentSnapshot = true;
+        Request->SendSerializedResult(std::move(message), Ydb::StatusIds::SUCCESS);
+        if (Streaming) {
+            ++PendingWrites;
+        } else {
+            PassAway();
+        }
     }
 
     void Handle(TEvDiscovery::TEvError::TPtr &ev) {
@@ -139,61 +145,6 @@ public:
             case TEvDiscovery::TEvError::DATABASE_NOT_EXIST: return Ydb::StatusIds::NOT_FOUND;
             case TEvDiscovery::TEvError::ACCESS_DENIED: return Ydb::StatusIds::NOT_FOUND;
             default: return Ydb::StatusIds::BAD_REQUEST;
-        }
-    }
-
-    bool CheckServices(const TSet<TString> &req, const NKikimrStateStorage::TEndpointBoardEntry &entry) {
-        if (req.empty())
-            return true;
-
-        for (const auto &x : entry.GetServices())
-            if (req.count(x))
-                return true;
-
-        return false;
-    }
-
-    void TryReplyAndDie() {
-        if (WritePending || !NameserviceResponse || PendingSnapshots.empty())
-            return;
-
-        auto response = std::move(PendingSnapshots.front());
-        PendingSnapshots.erase(PendingSnapshots.begin());
-        Y_ABORT_UNLESS(response->Status == TEvStateStorage::TEvBoardInfo::EStatus::Ok);
-
-        const TSet<TString> services(
-            Request->GetProtoRequest()->Getservice().begin(), Request->GetProtoRequest()->Getservice().end());
-
-        TString cachedMessage, cachedMessageSsl;
-
-        TString endpointId = Request->GetEndpointId();
-
-        if (!response->CachedMessage.empty() && !response->CachedMessageSsl.empty()) {
-            cachedMessage = response->CachedMessage;
-            cachedMessageSsl = response->CachedMessageSsl;
-        } else {
-            NDiscovery::TCachedMessageData cachedMessageData(
-                response->InfoEntries,
-                NameserviceResponse, response->BridgeInfo,
-                endpointId, services, response->Status, Streaming);
-
-            cachedMessage = std::move(cachedMessageData.CachedMessage);
-            cachedMessageSsl = std::move(cachedMessageData.CachedMessageSsl);
-        }
-
-        if (Request->SslServer()) {
-            ReplySerialized(std::move(cachedMessageSsl), Ydb::StatusIds::SUCCESS);
-        } else {
-            ReplySerialized(std::move(cachedMessage), Ydb::StatusIds::SUCCESS);
-        }
-    }
-
-    void ReplySerialized(TString message, Ydb::StatusIds::StatusCode status) {
-        Request->SendSerializedResult(std::move(message), status);
-        if (Streaming) {
-            WritePending = true;
-        } else {
-            PassAway();
         }
     }
 
