@@ -45,9 +45,9 @@ public:
     {}
 
     void Bootstrap() {
-        const auto& fromGeneration = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()
-            ? Request->GetProtoRequest()->from_generation() : TString{};
-        if (!fromGeneration.empty()) {
+        const ui64 fromGeneration = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()
+            ? Request->GetProtoRequest()->from_generation() : 0;
+        if (fromGeneration != 0) {
             Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup);
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
                 system->Send(self, new TEvents::TEvPoisonPill);
@@ -192,6 +192,19 @@ public:
         PassAway();
     }
 };
+
+TActorId RegisterDiscoveryResetService(const TActorContext& ctx, bool servesLongPolls) {
+    auto* system = ctx.ActorSystem();
+    // All discovery frontends use the primary request proxy on this node.
+    if (!AppData(ctx)->FeatureFlags.GetEnableDiscoveryReset() ||
+        system->LookupLocalService(CreateGRpcRequestProxyId()) != ctx.SelfID) {
+        return {};
+    }
+    const auto cache = servesLongPolls ? ctx.Register(CreateDiscoveryCache()) : TActorId{};
+    system->RegisterLocalService(MakeDiscoveryResetServiceID(ctx.SelfID.NodeId()),
+        ctx.Register(CreateDiscoveryResetService(cache)));
+    return cache;
+}
 
 void TGRpcRequestProxy::Handle(TEvListEndpointsRequest::TPtr& ev, const TActorContext& ctx) {
     if (!DiscoveryCacheActorID) {

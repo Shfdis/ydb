@@ -718,10 +718,10 @@ void TGRpcConnectionsImpl::SetGrpcCompressionAlgorithm(NYdbGrpc::TGRpcClientConf
     }
 }
 
-TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr dbState, const std::string& fromGeneration) {
+TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr dbState, std::uint64_t fromGeneration) {
     Ydb::Discovery::ListEndpointsRequest request;
     request.set_database(TStringType{dbState->Database});
-    request.set_from_generation(fromGeneration.data(), fromGeneration.size());
+    request.set_from_generation(fromGeneration);
 
     auto promise = NThreading::NewPromise<TListEndpointsResult>();
 
@@ -736,7 +736,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         };
 
     TRpcRequestSettings rpcSettings;
-    rpcSettings.Deadline = TDeadline::AfterDuration(fromGeneration.empty() ? GET_ENDPOINTS_TIMEOUT : std::chrono::seconds(45));
+    rpcSettings.Deadline = TDeadline::AfterDuration(fromGeneration == 0 ? GET_ENDPOINTS_TIMEOUT : std::chrono::seconds(45));
     rpcSettings.IncludeObservabilityInBuildInfo = true;
 
     RunDeferred<Ydb::Discovery::V1::DiscoveryService, Ydb::Discovery::ListEndpointsRequest, Ydb::Discovery::ListEndpointsResponse>(
@@ -750,7 +750,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
     std::weak_ptr<TDbDriverState> weakState = dbState;
 
     auto stopState = StopState_;
-    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState), waitForChange = !fromGeneration.empty()](NThreading::TFuture<TListEndpointsResult> future){
+    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState), waitForChange = fromGeneration != 0](NThreading::TFuture<TListEndpointsResult> future){
         auto strong = weakState.lock();
         auto result = future.ExtractValue();
         TSdkCallbackGuard guard(stopState);

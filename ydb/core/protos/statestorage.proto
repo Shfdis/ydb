@@ -206,6 +206,10 @@ message TEvReplicaBoardInfoUpdate {
     optional fixed64 ClusterStateGuid = 5;
 };
 
+message TDiscoveryResetResult {
+    optional uint64 ResetPolls = 1;
+}
+
 message TEndpointBoardEntry {
     optional string Address = 1;
     optional uint32 Port = 2;

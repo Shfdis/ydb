@@ -20,7 +20,8 @@ struct TListEndpointsResult {
     TPlainStatus DiscoveryStatus;
 
     bool SupportsLongPolling() const {
-        return !Result.generation().empty() && IsIn(Result.features(), Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+        return IsIn(Result.features(), Ydb::Discovery::ListEndpointsResult::LONG_POLLING)
+            && (Result.generation() != 0 || Result.endpoints().empty());
     }
 };
 
@@ -60,7 +61,7 @@ private:
     TDbDriverState& State_;
     std::atomic<bool> PollScheduled_{false};
     std::mutex Mutex_;
-    std::string Generation_;
+    std::uint64_t Generation_ = 0;
     TEndpointElectorSafe Elector_;
     NThreading::TPromise<TEndpointUpdateResult> DiscoveryPromise_;
     std::atomic_uint64_t LastUpdateTime_;

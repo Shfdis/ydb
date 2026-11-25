@@ -24,6 +24,7 @@ namespace NGRpcService {
 
 IActor* CreateGRpcRequestProxy(const NKikimrConfig::TAppConfig& appConfig);
 IActor* CreateGRpcRequestProxySimple(const NKikimrConfig::TAppConfig& appConfig);
+TActorId RegisterDiscoveryResetService(const TActorContext& ctx, bool servesLongPolls);
 
 class TGRpcRequestProxy : public TGRpcRequestProxyHandleMethods, public IFacilityProvider {
 public:

@@ -92,6 +92,7 @@ SRCS(
     viewer_put_record.h
     viewer_query.h
     viewer_render.h
+    viewer_reset_discovery.h
     viewer_request.cpp
     viewer_request.h
     viewer_storage.h
@@ -856,6 +857,7 @@ PEERDIR(
     ydb/core/blobstorage/base
     ydb/core/blobstorage/vdisk/common
     ydb/core/client/server
+    ydb/core/discovery
     ydb/core/external_sources
     ydb/core/graph/api
     ydb/core/grpc_services

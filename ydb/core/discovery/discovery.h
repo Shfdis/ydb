@@ -5,18 +5,29 @@
 #include <ydb/core/base/bridge.h>
 
 #include <ydb/library/actors/core/actor.h>
+#include <ydb/library/actors/core/event_simple_non_local.h>
 #include <ydb/library/actors/core/interconnect.h>
 #include <ydb/library/actors/interconnect/interconnect.h>
 
 namespace NKikimr {
+
+inline TActorId MakeDiscoveryResetServiceID(ui32 nodeId) {
+    return TActorId(nodeId, "DiscReset");
+}
 
 struct TEvDiscovery {
 
     enum EEv {
         EvError = EventSpaceBegin(TKikimrEvents::ES_DISCOVERY),
         EvDiscoveryData,
+        EvResetEndpoints,
+        EvResetEndpointsResult,
         EvEnd
     };
+
+    struct TEvResetEndpoints : NActors::TEventSimpleNonLocal<TEvResetEndpoints, EvResetEndpoints> {};
+    struct TEvResetEndpointsResult : TEventPB<TEvResetEndpointsResult,
+        NKikimrStateStorage::TDiscoveryResetResult, EvResetEndpointsResult> {};
 
     struct TEvError: public TEventLocal<TEvError, EvError> {
         enum EStatus {
@@ -43,7 +54,7 @@ struct TEvDiscovery {
         TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
         TBridgeInfo::TPtr BridgeInfo;
         TEvStateStorage::TEvBoardInfo::EStatus Status;
-        TString Generation;
+        ui64 Generation = 0;
         bool WaitingForChange = false;
     };
 };
@@ -58,7 +69,7 @@ public:
     TMap<TActorId, TEvStateStorage::TBoardInfoEntry> InfoEntries; // OwnerId -> Payload
     TBridgeInfo::TPtr BridgeInfo;
     TEvStateStorage::TEvBoardInfo::EStatus Status;
-    TString Generation;
+    ui64 Generation = 0;
 
 public:
     TCachedMessageData(const TString& cachedMessage, const TString& cachedMessageSsl,
@@ -78,11 +89,11 @@ public:
                         const TString& endpointId = {},
                         const TSet<TString>& services = {},
                         TEvStateStorage::TEvBoardInfo::EStatus status = TEvStateStorage::TEvBoardInfo::EStatus::Ok,
-                        TString generation = {})
+                        ui64 generation = 0)
         : InfoEntries(std::move(infoEntries))
         , BridgeInfo(bridgeInfo)
         , Status(status)
-        , Generation(std::move(generation))
+        , Generation(generation)
     {
         UpdateCache(nameserviceResponse, bridgeInfo, endpointId, services);
     }
@@ -109,7 +120,9 @@ IActor* CreateDiscoverer(
     const TString& database,
     bool returnSerializedMessage,
     const TActorId& replyTo,
-    const TActorId& cacheId, const TString& fromGeneration = {});
+    const TActorId& cacheId, ui64 fromGeneration = 0);
+
+IActor* CreateDiscoveryResetService(TActorId cache);
 
 // Used to reduce number of requests to Board
 IActor* CreateDiscoveryCache(const TString& endpointId = {}, const TMaybe<TActorId>& nameserviceActorId = {});

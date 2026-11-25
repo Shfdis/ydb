@@ -12,8 +12,8 @@ message ListEndpointsRequest {
     string database = 1;
     repeated string service = 2;
     // Echo the last generation for the same database and filters to wait for a change.
-    // An empty or unknown generation requests the current snapshot without waiting.
-    bytes from_generation = 3;
+    // Zero or an unknown generation requests the current snapshot immediately.
+    uint64 from_generation = 3;
 }
 
 message EndpointInfo {
@@ -54,12 +54,12 @@ message ListEndpointsResult {
         LONG_POLLING = 1;
         STREAM_LIST_ENDPOINTS = 2;
     }
-    // Discovery modes supported by this server.
+    // Discovery modes supported by this server. Only advertised modes may be used.
     repeated Feature features = 4;
 
-    // Opaque generation of this snapshot when LONG_POLLING is advertised.
-    // On timeout the server returns the current snapshot with the same generation.
-    bytes generation = 5;
+    // Snapshot version local to this discovery server. Compare for equality only.
+    // A reset returns an empty endpoint list and zero to request a fresh discovery.
+    uint64 generation = 5;
 }
 
 message ListEndpointsResponse {

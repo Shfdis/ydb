@@ -349,6 +349,7 @@ private:
 };
 
 void TGRpcRequestProxyImpl::Bootstrap(const TActorContext& ctx) {
+    DiscoveryCacheActorID = RegisterDiscoveryResetService(ctx, true);
     AllowYdbRequestsWithoutDatabase = AppData(ctx)->FeatureFlags.GetAllowYdbRequestsWithoutDatabase();
 
     // Subscribe for TableService config changes

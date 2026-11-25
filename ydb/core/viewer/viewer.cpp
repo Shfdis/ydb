@@ -249,6 +249,7 @@ public:
 
                     // Administration-level endpoints.
                     {"/viewer/bscontrollerinfo", {EViewerEndpointAccessType::Administration}},
+                    {"/viewer/reset_discovery_streams", {EViewerEndpointAccessType::Administration}},
 
                     // Monitoring-level endpoints.
                     // restart pdisk and evict vdisk endpoints below have some query-parameters,

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import abc
+from contextlib import ExitStack
 import six
 import time
 import logging
 
 import grpc
 import pytest
+import requests
 from hamcrest import assert_that, is_, not_
 
 from ydb.public.api.grpc.ydb_discovery_v1_pb2_grpc import DiscoveryServiceStub
@@ -66,6 +68,78 @@ def wait_until_discovery_includes_all_slot_ports(
             % (sorted(required), last_observed["ports"], last_observed["debug_details"])
         ),
     )
+
+
+def _long_poll_snapshot(reply):
+    assert reply.operation.status == StatusIds.SUCCESS
+    result = discovery.ListEndpointsResult()
+    assert reply.operation.result.Unpack(result)
+    assert result.LONG_POLLING in result.features
+    assert result.generation or not result.endpoints
+    return result
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_reset_discovery_long_polls(enabled):
+    admin = {"Authorization": "root@builtin"}
+    config = KikimrConfigGenerator(
+        nodes=2, erasure=types.Erasure.NONE, default_clusteradmin="root@builtin",
+        extra_feature_flags=["enable_discovery_reset"] if enabled else [],
+    )
+    config.yaml_config["domains_config"]["security_config"].setdefault("viewer_allowed_sids", []).append("reader@builtin")
+    cluster = KiKiMR(config)
+    cluster.start()
+    try:
+        node = cluster.nodes[1]
+        url = f"http://{node.host}:{node.mon_port}/viewer/reset_discovery_streams"
+        if not enabled:
+            assert requests.post(url, headers=admin, timeout=5).status_code == 404
+            return
+
+        with ExitStack() as channels:
+            ports = {frontend.grpc_port for frontend in cluster.nodes.values()}
+            rpcs = [DiscoveryServiceStub(channels.enter_context(grpc.insecure_channel(frontend.endpoint))).ListEndpoints
+                    for frontend in cluster.nodes.values()]
+            ordinary = discovery.ListEndpointsRequest(database="/Root")
+
+            def all_ports_present():
+                for rpc in rpcs:
+                    try:
+                        reply = rpc(ordinary, timeout=5)
+                    except grpc.RpcError:
+                        return False
+                    result = discovery.ListEndpointsResult()
+                    if reply.operation.status != StatusIds.SUCCESS or not reply.operation.result.Unpack(result):
+                        return False
+                    if not ports <= {ep.port for ep in result.endpoints}:
+                        return False
+                return True
+
+            assert wait_for(all_ports_present, timeout_seconds=20, step_seconds=0.2)
+            versions = [_long_poll_snapshot(rpc(ordinary, timeout=5)).generation for rpc in rpcs]
+            polls = []
+            for index, rpc in enumerate(rpcs):
+                request = discovery.ListEndpointsRequest(database="/Root", from_generation=versions[index - 1])
+                assert _long_poll_snapshot(rpc(request, timeout=5)).generation == versions[index]
+                request.from_generation = versions[index]
+                polls.append((rpc, rpc.future(request, timeout=25)))
+            assert requests.get(url, headers=admin, timeout=5).status_code == 400
+            assert requests.post(url, headers={"Authorization": "reader@builtin"}, timeout=5).status_code == 403
+            for _, poll in polls:
+                with pytest.raises(grpc.FutureTimeoutError):
+                    poll.result(timeout=0.5)
+
+            response = requests.post(url, headers=admin, timeout=10)
+            assert response.status_code == 200, response.text
+            assert response.json()["reset_polls"] == len(polls)
+            for rpc, poll in polls:
+                reset = _long_poll_snapshot(poll.result(timeout=5))
+                assert not reset.endpoints
+                assert reset.generation == 0
+                assert ports <= {ep.port for ep in _long_poll_snapshot(rpc(ordinary, timeout=5)).endpoints}
+            assert requests.post(url, headers=admin, timeout=5).json()["reset_polls"] == 0
+    finally:
+        cluster.stop()
 
 
 class TestDiscoveryExtEndpoint(object):
@@ -293,17 +367,10 @@ class AbstractTestDiscoveryFaultInjection(object):
 
 class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
     def inject_fault(self, slot):
-        def snapshot(reply):
-            assert reply.operation.status == StatusIds.SUCCESS
-            result = discovery.ListEndpointsResult()
-            assert reply.operation.result.Unpack(result)
-            assert result.LONG_POLLING in result.features and result.generation
-            return result
-
         with grpc.insecure_channel(self.cluster.nodes[1].endpoint) as channel:
             list_endpoints = DiscoveryServiceStub(channel).ListEndpoints
             request = discovery.ListEndpointsRequest(database=self.database_name)
-            initial = snapshot(list_endpoints(request, timeout=5))
+            initial = _long_poll_snapshot(list_endpoints(request, timeout=5))
             request.from_generation = initial.generation
             pending = [list_endpoints.future(request, timeout=25) for _ in range(2)]
             with pytest.raises(grpc.FutureTimeoutError):
@@ -311,11 +378,11 @@ class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
             slot.stop()
             expected = {s.grpc_port for s in self.cluster.slots.values()} - {slot.grpc_port}
             for call in pending:
-                result = snapshot(call.result())
+                result = _long_poll_snapshot(call.result())
                 assert {ep.port for ep in result.endpoints} == expected
                 assert result.generation != initial.generation
             # The board changed before this poll started.
-            current = snapshot(list_endpoints(request, timeout=5))
+            current = _long_poll_snapshot(list_endpoints(request, timeout=5))
             assert {ep.port for ep in current.endpoints} == expected
             assert current.generation != initial.generation
 

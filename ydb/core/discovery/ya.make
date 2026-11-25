@@ -5,7 +5,6 @@ SRCS(
 )
 
 PEERDIR(
-    library/cpp/digest/md5
     ydb/core/base
     ydb/core/blobstorage/base
     ydb/core/tx/scheme_cache

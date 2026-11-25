@@ -155,6 +155,7 @@ private:
 };
 
 void TGRpcRequestProxySimple::Bootstrap(const TActorContext& ctx) {
+    RegisterDiscoveryResetService(ctx, false);
     auto nodeID = SelfId().NodeId();
 
     LOG_NOTICE(ctx, NKikimrServices::GRPC_SERVER, "Grpc simple request proxy started, nodeid# %d", nodeID);

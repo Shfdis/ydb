@@ -30,6 +30,7 @@
 #include "viewer_put_record.h"
 #include "viewer_query.h"
 #include "viewer_render.h"
+#include "viewer_reset_discovery.h"
 #include "viewer_storage.h"
 #include "viewer_storage_usage.h"
 #include "viewer_tabletcounters.h"
@@ -330,6 +331,11 @@ void InitViewerTextStreamCounterHandler(TJsonHandlers& handlers) {
 }
 
 void InitViewerJsonHandlers(TJsonHandlers& jsonHandlers) {
+    const auto& ns = AppData()->DynamicNameserviceConfig;
+    if (AppData()->FeatureFlags.GetEnableDiscoveryReset() &&
+        (!ns || TActivationContext::ActorSystem()->NodeId <= ns->MaxStaticNodeId)) {
+        jsonHandlers.AddHandler("/viewer/reset_discovery_streams", new TJsonHandler<TResetDiscovery>(TResetDiscovery::GetSwagger()));
+    }
     InitViewerCapabilitiesJsonHandler(jsonHandlers);
     InitViewerNodelistJsonHandler(jsonHandlers);
     InitViewerNodeInfoJsonHandler(jsonHandlers);

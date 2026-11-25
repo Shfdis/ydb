@@ -27,7 +27,7 @@ struct TListEndpointsResult;
 
 class IInternalClient {
 public:
-    virtual NThreading::TFuture<TListEndpointsResult> GetEndpoints(std::shared_ptr<TDbDriverState> dbState, const std::string& fromGeneration) = 0;
+    virtual NThreading::TFuture<TListEndpointsResult> GetEndpoints(std::shared_ptr<TDbDriverState> dbState, std::uint64_t fromGeneration) = 0;
     virtual void ScheduleCallback(TDuration delay, std::function<void(bool)> callback, NYdbGrpc::IQueueClientContextPtr token = nullptr) = 0;
     virtual void AddPeriodicTask(TPeriodicCb&& cb, TDeadline::Duration period) = 0;
     virtual void PostToResponseQueue(std::function<void()>&& f) = 0;

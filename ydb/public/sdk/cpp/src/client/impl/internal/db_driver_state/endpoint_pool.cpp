@@ -29,7 +29,7 @@ TEndpointPool::~TEndpointPool() {
 
 std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(bool longPoll) {
     NThreading::TFuture<TEndpointUpdateResult> future;
-    std::string fromGeneration;
+    std::uint64_t fromGeneration = 0;
     {
         std::lock_guard guard(Mutex_);
         if (DiscoveryPromise_.Initialized()) {
@@ -134,7 +134,7 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
                 state->LongPolling = result.DiscoveryStatus.Ok() && result.SupportsLongPolling();
             }
             Generation_ = state->LongPolling && result.DiscoveryStatus.Ok() && !result.Result.endpoints().empty()
-                ? std::string(result.Result.generation()) : std::string{};
+                ? result.Result.generation() : 0;
             schedule = state->LongPolling && !PollScheduled_.exchange(true);
         }
         if (schedule) {
