@@ -386,7 +386,7 @@ not-base64
             auto tableServer = StartGrpcServer(TStringBuilder() << "127.0.0.1:" << tablePort, table);
             struct TDiscovery : TMockDiscoveryService {
                 Ydb::Discovery::ListEndpointsResult Standby;
-                TManualEvent Empty, Publish, Reopened, Stopped, Cancelled;
+                TManualEvent Empty, Publish, Reopened, Cancelled;
                 std::atomic_uint Subscriptions = 0;
 
                 grpc::Status StreamListEndpoints(grpc::ServerContext* context, const Ydb::Discovery::ListEndpointsRequest* request,
@@ -403,7 +403,11 @@ not-base64
                     } else {
                         writer->Write(Standby);
                         Reopened.Signal();
-                        if (Stopped.WaitT(TDuration::Seconds(10)) && context->IsCancelled()) {
+                        const auto deadline = TInstant::Now() + TDuration::Seconds(10);
+                        while (!context->IsCancelled() && TInstant::Now() < deadline) {
+                            Sleep(TDuration::MilliSeconds(10));
+                        }
+                        if (context->IsCancelled()) {
                             Cancelled.Signal();
                         }
                     }
@@ -442,7 +446,6 @@ not-base64
             }
             UNIT_ASSERT(discovery.Reopened.WaitT(TDuration::Seconds(10)));
             driver.Stop(true);
-            discovery.Stopped.Signal();
             UNIT_ASSERT(discovery.Cancelled.WaitT(TDuration::Seconds(2)));
             UNIT_ASSERT_VALUES_EQUAL(discovery.Subscriptions.load(), 2);
         }
