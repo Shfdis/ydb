@@ -27,7 +27,7 @@ TEndpointPool::~TEndpointPool() {
     }
 }
 
-std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(bool waitForChange) {
+std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::UpdateAsync(const std::string& fromGeneration) {
     NThreading::TFuture<TEndpointUpdateResult> future;
     {
         std::lock_guard guard(Mutex_);
@@ -127,19 +127,20 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
             std::lock_guard guard(Mutex_);
             DiscoveryPromise_.Swap(promise);
             if (result.DiscoveryStatus.Ok() || result.DiscoveryStatus.Status == EStatus::CLIENT_CANCELLED) {
-                state->LongPolling = result.DiscoveryStatus.Ok() && result.Result.allow_long_polling();
+                state->LongPolling = result.DiscoveryStatus.Ok() && result.SupportsLongPolling();
             }
             schedule = state->LongPolling && !PollScheduled_.exchange(true);
         }
         if (schedule) {
-            const bool wait = result.DiscoveryStatus.Ok() && !result.Result.endpoints().empty();
+            const std::string generation = result.DiscoveryStatus.Ok() && !result.Result.endpoints().empty()
+                ? std::string(result.Result.generation()) : std::string{};
             const TDuration elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started);
             const auto delay = result.DiscoveryStatus.Ok() ? TDuration::MilliSeconds(100) - elapsed : TDuration::Seconds(5);
-            state->Client->ScheduleCallback(delay, [weak = state->weak_from_this(), wait](bool ok) {
+            state->Client->ScheduleCallback(delay, [weak = state->weak_from_this(), generation](bool ok) {
                 if (auto state = weak.lock()) {
                     state->EndpointPool.PollScheduled_ = false;
                     if (ok && state->LongPolling) {
-                        state->EndpointPool.UpdateAsync(wait && !state->GetEndpoint().empty());
+                        state->EndpointPool.UpdateAsync(state->GetEndpoint().empty() ? std::string{} : generation);
                     }
                 }
             });
@@ -147,7 +148,7 @@ std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> TEndpointPool::Updat
         promise.SetValue({std::move(removed), std::move(result.DiscoveryStatus)});
     };
 
-    state->Client->GetEndpoints(state, waitForChange).Subscribe(handler);
+    state->Client->GetEndpoints(state, fromGeneration).Subscribe(handler);
     return {future, true};
 }
 

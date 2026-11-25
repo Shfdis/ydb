@@ -293,20 +293,31 @@ class AbstractTestDiscoveryFaultInjection(object):
 
 class TestDiscoveryFaultInjectionSlotStop(AbstractTestDiscoveryFaultInjection):
     def inject_fault(self, slot):
+        def snapshot(reply):
+            assert reply.operation.status == StatusIds.SUCCESS
+            result = discovery.ListEndpointsResult()
+            assert reply.operation.result.Unpack(result)
+            assert result.LONG_POLLING in result.features and result.generation
+            return result
+
         with grpc.insecure_channel(self.cluster.nodes[1].endpoint) as channel:
             list_endpoints = DiscoveryServiceStub(channel).ListEndpoints
-            request = discovery.ListEndpointsRequest(database=self.database_name, wait_for_change=True)
+            request = discovery.ListEndpointsRequest(database=self.database_name)
+            initial = snapshot(list_endpoints(request, timeout=5))
+            request.from_generation = initial.generation
             pending = [list_endpoints.future(request, timeout=25) for _ in range(2)]
             with pytest.raises(grpc.FutureTimeoutError):
                 pending[0].result(timeout=1)
             slot.stop()
             expected = {s.grpc_port for s in self.cluster.slots.values()} - {slot.grpc_port}
             for call in pending:
-                response = call.result().operation
-                assert response.status == StatusIds.SUCCESS
-                result = discovery.ListEndpointsResult()
-                assert response.result.Unpack(result) and result.allow_long_polling
+                result = snapshot(call.result())
                 assert {ep.port for ep in result.endpoints} == expected
+                assert result.generation != initial.generation
+            # The board changed before this poll started.
+            current = snapshot(list_endpoints(request, timeout=5))
+            assert {ep.port for ep in current.endpoints} == expected
+            assert current.generation != initial.generation
 
     def extract_fault(self, slot):
         slot.start()

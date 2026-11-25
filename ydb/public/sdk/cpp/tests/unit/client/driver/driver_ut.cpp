@@ -397,10 +397,15 @@ not-base64
             endpoint->set_port(tablePort);
             discovery.OnListEndpoints = [&](const auto& request, auto& snapshot) {
                 const int call = ++calls;
-                if (call > 5 || request.wait_for_change() != (call == 2 || call == 5)) {
+                const char* expected = call == 2 ? "initial" : call == 5 ? "restored" : "";
+                if (call > 5 || request.from_generation() != expected) {
                     unexpectedPoll.Signal();
                 }
-                snapshot.set_allow_long_polling(call < 5);
+                snapshot.add_features(Ydb::Discovery::ListEndpointsResult::STREAM_LIST_ENDPOINTS);
+                if (call < 5) {
+                    snapshot.add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+                }
+                snapshot.set_generation(call == 1 ? "initial" : call == 4 ? "restored" : "empty");
                 if (call == 2 || call == 3) {
                     snapshot.clear_endpoints();
                 }

@@ -13,8 +13,11 @@
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/core/hfunc.h>
 
+#include <library/cpp/digest/md5/md5.h>
 #include <util/generic/xrange.h>
 #include <util/random/shuffle.h>
+#include <util/stream/str.h>
+#include <util/ysaveload.h>
 
 namespace NKikimr {
 
@@ -226,9 +229,12 @@ namespace NDiscovery {
             }
         }
 
-        const bool subscriptions = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-        cachedMessage.set_allow_long_polling(subscriptions);
-        cachedMessageSsl.set_allow_long_polling(subscriptions);
+        if (!Generation.empty()) {
+            cachedMessage.add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+            cachedMessageSsl.add_features(Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+            cachedMessage.set_generation(Generation);
+            cachedMessageSsl.set_generation(Generation);
+        }
         CachedMessage = SerializeResult(cachedMessage);
         CachedMessageSsl = SerializeResult(cachedMessageSsl);
         BridgeInfo = bridgeInfo;
@@ -242,6 +248,7 @@ namespace NDiscovery {
         } else {
             event->InfoEntries = InfoEntries;
             event->BridgeInfo = BridgeInfo;
+            event->Generation = Generation;
         }
 
         if (InfoEntries.empty() && !allowEmpty) {
@@ -264,12 +271,12 @@ namespace NDiscoveryPrivate {
         struct TEvRequest: public TEventLocal<TEvRequest, EvRequest> {
             const TString Database;
             bool ReturnSerializedMessage = true;
-            bool WaitForChange;
+            TString FromGeneration;
 
-            TEvRequest(const TString& db, bool returnSerializedMessage, bool waitForChange)
+            TEvRequest(const TString& db, bool returnSerializedMessage, const TString& fromGeneration)
                 : Database(db)
                 , ReturnSerializedMessage(returnSerializedMessage)
-                , WaitForChange(waitForChange)
+                , FromGeneration(fromGeneration)
             {
             }
         };
@@ -294,7 +301,7 @@ namespace NDiscoveryPrivate {
             TActorId ActorId;
             ui64 Cookie;
             bool ReturnSerializedMessage;
-            bool WaitForChange;
+            TString FromGeneration;
         };
 
         struct TAwaitingRequest {
@@ -347,11 +354,12 @@ namespace NDiscoveryPrivate {
         }
 
         void SendSnapshot(const TString& path, NDiscovery::TCachedMessageData& data, const TWaiter& waiter, bool initial) {
-            if (waiter.WaitForChange && waiter.ReturnSerializedMessage && DirtyCachedMessages.erase(path)) {
-                data.UpdateCache(NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}));
+            const bool polling = !waiter.FromGeneration.empty();
+            if (DirtyCachedMessages.erase(path)) {
+                RefreshSnapshot(path, data);
             }
-            auto event = THolder(data.ToEvent(waiter.ReturnSerializedMessage, waiter.WaitForChange));
-            event->WaitingForChange = initial && waiter.WaitForChange && !data.InfoEntries.empty();
+            auto event = THolder(data.ToEvent(waiter.ReturnSerializedMessage, polling));
+            event->WaitingForChange = initial && polling && waiter.FromGeneration == data.Generation;
             Send(waiter.ActorId, std::move(event), 0, waiter.Cookie);
         }
 
@@ -363,6 +371,30 @@ namespace NDiscoveryPrivate {
                 }
                 WaitingForChange.erase(it);
             }
+        }
+
+        TString SnapshotGeneration(const TString& path, const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& entries) const {
+            if (!AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()) {
+                return {};
+            }
+            // Different discovery nodes can serve consecutive requests. Hash the sorted board, before endpoint shuffling.
+            TStringStream input;
+            const auto& node = NameserviceResponse->Node;
+            SaveMany(&input, AppData()->ClusterName, path, node ? node->Location.GetDataCenterId() : TString{}, ui64(entries.size()));
+            for (const auto& [owner, entry] : entries) {
+                SaveMany(&input, owner.RawX1(), owner.RawX2(), entry.Payload);
+            }
+            if (BridgeInfo) {
+                for (const auto& pile : BridgeInfo->Piles) {
+                    SaveMany(&input, pile.Name, pile.State, pile.IsPrimary, pile.IsBeingPromoted);
+                }
+            }
+            return MD5::CalcRaw(input.Str());
+        }
+
+        void RefreshSnapshot(const TString& path, NDiscovery::TCachedMessageData& data) {
+            data.Generation = SnapshotGeneration(path, data.InfoEntries);
+            data.UpdateCache(NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}));
         }
 
         void Handle(TEvInterconnect::TEvNodeInfo::TPtr &ev) {
@@ -419,10 +451,9 @@ namespace NDiscoveryPrivate {
             Y_ABORT_UNLESS(NameserviceResponse);
             Y_ABORT_UNLESS(!IsBridgeMode(ActorContext()) || BridgeInfo);
 
-            auto newCachedData = std::make_shared<NDiscovery::TCachedMessageData>(
-                NDiscovery::TCachedMessageData(std::move(msg->InfoEntries), NameserviceResponse, BridgeInfo,
-                EndpointId.GetOrElse({}), {}, msg->Status)
-            );
+            auto generation = SnapshotGeneration(path, msg->InfoEntries);
+            auto newCachedData = std::make_shared<NDiscovery::TCachedMessageData>(std::move(msg->InfoEntries),
+                NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}), TSet<TString>{}, msg->Status, std::move(generation));
 
             DirtyCachedMessages.erase(path);
 
@@ -459,8 +490,8 @@ namespace NDiscoveryPrivate {
             Y_ABORT_UNLESS(NameserviceResponse);
             Y_ABORT_UNLESS(!IsBridgeMode(ActorContext()) || BridgeInfo);
 
-            for (auto& [_, cachedData] : DirtyCachedMessages) {
-                cachedData->UpdateCache(NameserviceResponse, BridgeInfo, EndpointId.GetOrElse({}));
+            for (auto& [path, cachedData] : DirtyCachedMessages) {
+                RefreshSnapshot(path, *cachedData);
             }
 
             DirtyCachedMessages.clear();
@@ -471,8 +502,8 @@ namespace NDiscoveryPrivate {
         void Handle(TEvPrivate::TEvRequest::TPtr& ev) {
             const auto* msg = ev->Get();
             YDB_LOG_TRACE_COMP(NKikimrServices::DISCOVERY_CACHE, "Handle request", {"ev", msg->ToString()});
-            TWaiter waiter{ev->Sender, ev->Cookie, msg->ReturnSerializedMessage, msg->WaitForChange};
-            if (waiter.WaitForChange) {
+            TWaiter waiter{ev->Sender, ev->Cookie, msg->ReturnSerializedMessage, msg->FromGeneration};
+            if (!waiter.FromGeneration.empty()) {
                 WaitingForChange[msg->Database].emplace(ev->Sender, waiter);
             }
             if (CurrentStateFunc() == &TThis::Initializing) {
@@ -596,7 +627,7 @@ class TDiscoverer: public TActorBootstrapped<TDiscoverer> {
     const bool ReturnSerializedMessage;
     const TActorId ReplyTo;
     const TActorId CacheId;
-    const bool WaitForChange;
+    const TString FromGeneration;
     TMaybe<TString> WatchPath;
 
     THolder<TEvDiscovery::TEvDiscoveryData> LookupResponse;
@@ -618,13 +649,13 @@ public:
     explicit TDiscoverer(
             TLookupPathFunc f, const TString& database,
             bool returnSerializedMessage,
-            const TActorId& replyTo, const TActorId& cacheId, bool waitForChange)
+            const TActorId& replyTo, const TActorId& cacheId, const TString& fromGeneration)
         : MakeLookupPath(f)
         , Database(database)
         , ReturnSerializedMessage(returnSerializedMessage)
         , ReplyTo(replyTo)
         , CacheId(cacheId)
-        , WaitForChange(waitForChange)
+        , FromGeneration(fromGeneration)
     {
     }
 
@@ -636,7 +667,7 @@ public:
     }
 
     void Bootstrap() {
-        if (!WaitForChange) {
+        if (FromGeneration.empty()) {
             Lookup(Database);
         }
         Navigate(Database);
@@ -721,7 +752,7 @@ public:
 
             Navigate(info->ResourcesDomainKey);
             ResolveResources = true;
-        } else if (ResolveResources || WaitForChange) {
+        } else if (ResolveResources || !FromGeneration.empty()) {
             Lookup(CanonizePath(entry.Path));
         }
 
@@ -789,10 +820,10 @@ public:
         }
 
         const auto reqPath = MakeLookupPath(database);
-        if (WaitForChange) {
+        if (!FromGeneration.empty()) {
             WatchPath = reqPath;
         }
-        Send(CacheId, new NDiscoveryPrivate::TEvPrivate::TEvRequest(reqPath, ReturnSerializedMessage, WaitForChange), 0, ++LookupCookie);
+        Send(CacheId, new NDiscoveryPrivate::TEvPrivate::TEvRequest(reqPath, ReturnSerializedMessage, FromGeneration), 0, ++LookupCookie);
         LookupResponse.Reset();
     }
 
@@ -829,8 +860,8 @@ IActor* CreateDiscoverer(
         const TString& database,
         bool returnSerializedMessage,
         const TActorId& replyTo,
-        const TActorId& cacheId, bool waitForChange) {
-    return new TDiscoverer(f, database, returnSerializedMessage, replyTo, cacheId, waitForChange);
+        const TActorId& cacheId, const TString& fromGeneration) {
+    return new TDiscoverer(f, database, returnSerializedMessage, replyTo, cacheId, fromGeneration);
 }
 
 IActor* CreateDiscoveryCache(const TString& endpointId, const TMaybe<TActorId>& nameserviceActorId) {

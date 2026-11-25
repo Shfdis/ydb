@@ -790,7 +790,7 @@ public:
             }, dbState, requestSettings.PreferredEndpoint, requestSettings.EndpointPolicy);
     }
 
-    TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState, bool waitForChange) override;
+    TAsyncListEndpointsResult GetEndpoints(TDbDriverStatePtr dbState, const std::string& fromGeneration) override;
     TListEndpointsResult MutateDiscovery(TListEndpointsResult result, const TDbDriverState* dbDriverState);
 
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL

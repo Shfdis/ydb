@@ -45,9 +45,9 @@ public:
     {}
 
     void Bootstrap() {
-        const bool waitForChange = Request->GetProtoRequest()->wait_for_change()
-            && AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery();
-        if (waitForChange) {
+        const auto& fromGeneration = AppData()->FeatureFlags.GetEnableSubscriptionsInDiscovery()
+            ? Request->GetProtoRequest()->from_generation() : TString{};
+        if (!fromGeneration.empty()) {
             Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup);
             Request->SetFinishAction([system = TActivationContext::ActorSystem(), self = SelfId()] {
                 system->Send(self, new TEvents::TEvPoisonPill);
@@ -56,7 +56,7 @@ public:
         // request endpoints
         Discoverer = Register(CreateDiscoverer(&MakeEndpointsBoardPath,
             Request->GetProtoRequest()->database(), Request->GetEndpointId().empty() && Request->GetProtoRequest()->Getservice().empty(),
-            SelfId(), CacheId, waitForChange));
+            SelfId(), CacheId, fromGeneration));
 
         // request self node info
         Send(GetNameserviceActorId(), new TEvInterconnect::TEvGetNode(SelfId().NodeId()));
@@ -169,7 +169,7 @@ public:
             NDiscovery::TCachedMessageData cachedMessageData(
                 std::move(LookupResponse->InfoEntries),
                 NameserviceResponse, LookupResponse->BridgeInfo,
-                endpointId, services);
+                endpointId, services, LookupResponse->Status, LookupResponse->Generation);
 
             cachedMessage = std::move(cachedMessageData.CachedMessage);
             cachedMessageSsl = std::move(cachedMessageData.CachedMessageSsl);

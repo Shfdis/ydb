@@ -9,6 +9,7 @@
 #include <ydb/public/sdk/cpp/src/client/impl/endpoints/endpoints.h>
 
 #include <library/cpp/threading/future/future.h>
+#include <util/generic/is_in.h>
 
 #include <mutex>
 
@@ -17,6 +18,10 @@ namespace NYdb::inline Dev {
 struct TListEndpointsResult {
     Ydb::Discovery::ListEndpointsResult Result;
     TPlainStatus DiscoveryStatus;
+
+    bool SupportsLongPolling() const {
+        return !Result.generation().empty() && IsIn(Result.features(), Ydb::Discovery::ListEndpointsResult::LONG_POLLING);
+    }
 };
 
 using TAsyncListEndpointsResult = NThreading::TFuture<TListEndpointsResult>;
@@ -30,7 +35,7 @@ class TEndpointPool {
 public:
     explicit TEndpointPool(TDbDriverState& state);
     ~TEndpointPool();
-    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(bool waitForChange = false);
+    std::pair<NThreading::TFuture<TEndpointUpdateResult>, bool> UpdateAsync(const std::string& fromGeneration = {});
     TEndpointRecord GetEndpoint(const TEndpointKey& preferredEndpoint, bool onlyPreferred = false) const;
     TDuration TimeSinceLastUpdate() const;
     void BanEndpoint(const std::string& endpoint);

@@ -718,10 +718,10 @@ void TGRpcConnectionsImpl::SetGrpcCompressionAlgorithm(NYdbGrpc::TGRpcClientConf
     }
 }
 
-TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr dbState, bool waitForChange) {
+TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr dbState, const std::string& fromGeneration) {
     Ydb::Discovery::ListEndpointsRequest request;
     request.set_database(TStringType{dbState->Database});
-    request.set_wait_for_change(waitForChange);
+    request.set_from_generation(fromGeneration.data(), fromGeneration.size());
 
     auto promise = NThreading::NewPromise<TListEndpointsResult>();
 
@@ -736,7 +736,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         };
 
     TRpcRequestSettings rpcSettings;
-    rpcSettings.Deadline = TDeadline::AfterDuration(waitForChange ? std::chrono::seconds(45) : GET_ENDPOINTS_TIMEOUT);
+    rpcSettings.Deadline = TDeadline::AfterDuration(fromGeneration.empty() ? GET_ENDPOINTS_TIMEOUT : std::chrono::seconds(45));
     rpcSettings.IncludeObservabilityInBuildInfo = true;
 
     RunDeferred<Ydb::Discovery::V1::DiscoveryService, Ydb::Discovery::ListEndpointsRequest, Ydb::Discovery::ListEndpointsResponse>(
@@ -750,7 +750,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
     std::weak_ptr<TDbDriverState> weakState = dbState;
 
     auto stopState = StopState_;
-    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState), waitForChange](NThreading::TFuture<TListEndpointsResult> future){
+    return promise.GetFuture().Apply([this, weakState, stopState = std::move(stopState), waitForChange = !fromGeneration.empty()](NThreading::TFuture<TListEndpointsResult> future){
         auto strong = weakState.lock();
         auto result = future.ExtractValue();
         TSdkCallbackGuard guard(stopState);
@@ -763,7 +763,7 @@ TAsyncListEndpointsResult TGRpcConnectionsImpl::GetEndpoints(TDbDriverStatePtr d
         result = MutateDiscovery(std::move(result), strong.get());
         // Async callers share this refresh and retry on a successful empty list.
         if (!waitForChange && strong && strong->LongPolling && result.DiscoveryStatus.Ok()
-                && result.Result.allow_long_polling() && result.Result.endpoints().empty()) {
+                && result.SupportsLongPolling() && result.Result.endpoints().empty()) {
             return ScheduleFuture(TDuration::Seconds(1)).Apply([result = std::move(result)](const auto& timer) mutable {
                 if (!timer.GetValue()) {
                     result.DiscoveryStatus = MakeClientStoppedStatus();
